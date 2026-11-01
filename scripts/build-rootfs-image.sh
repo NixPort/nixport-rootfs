@@ -84,6 +84,13 @@ if [[ "$SUITE" != "trixie" ]]; then
   echo "::warning::compare and rebuild scripts/build-glibc.sh if this base is newer)."
 fi
 
+# binfmt 自保证（extract-rootfs-repo 首轮 CI 教训）：不能信任 CI 的 setup-qemu
+# action（tonistiigi/binfmt:latest 兼容性漂移会让 arm64 容器 exec format error），
+# 与 build-rootfs.sh 一致——脚本自己注册并用真实容器验证。
+# binfmt self-provision (first CI round lesson): never trust the CI setup-qemu
+# action alone (tonistiigi/binfmt:latest drift breaks arm64 exec); like
+# build-rootfs.sh, register and verify with a real container here.
+scripts/ensure-binfmt.sh
 echo ">> base image: $IMAGE ($PLATFORM), suite $SUITE"
 docker pull --platform "$PLATFORM" "$IMAGE" >/dev/null
 # The digest is the identity of the base: the same tree must come from the same
