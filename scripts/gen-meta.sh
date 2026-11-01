@@ -30,10 +30,21 @@ BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # meta.json 与逐资产 .sha256 必须同源生成（同一套文件、同一次哈希）。
 # meta.json and per-asset .sha256 are generated from the same file set in one pass.
-python3 - "$REL" "$FXD_PACKAGE" "$FXD_ROOT" "$FXD_LDSO" "$LIBC6" "$SUITE" "$GIT_SHA" "$BUILT_AT" <<'PY'
+# BASE_META：部分重建时 CI 先取回 release 现存的 meta.json 放到该路径；合并语义
+# = 本次打包的资产条目覆盖、其余保留；partial=true 且 rebuilt_from 记本次 sha，
+# built_from 保持最近一次完整构建的 sha。
+# BASE_META: for partial rebuilds CI puts the release's current meta.json here;
+# merge = this run's packed assets overwrite, others are kept; partial=true with
+# rebuilt_from = this sha, while built_from stays at the last FULL build's sha.
+python3 - "$REL" "$FXD_PACKAGE" "$FXD_ROOT" "$FXD_LDSO" "$LIBC6" "$SUITE" "$GIT_SHA" "$BUILT_AT" "${BASE_META:-}" <<'PY'
 import hashlib, json, pathlib, sys
 
 rel = pathlib.Path(sys.argv[1])
+base_path = sys.argv[9]
+base = {}
+if base_path and pathlib.Path(base_path).is_file():
+    base = json.loads(pathlib.Path(base_path).read_text())
+
 meta = {
     "schema": "nixport.rootfs-meta.v1",
     "fx_package": sys.argv[2],
@@ -43,11 +54,18 @@ meta = {
     "suite": sys.argv[6],
     "built_from": sys.argv[7],
     "built_at": sys.argv[8],
+    "partial": False,
     "assets": {},
 }
+if base.get("schema") == "nixport.rootfs-meta.v1":
+    meta["assets"] = dict(base.get("assets", {}))
+    meta["partial"] = True
+    meta["built_from"] = base.get("built_from", sys.argv[7])
+    meta["rebuilt_from"] = sys.argv[7]
+
 assets = sorted(p for p in rel.iterdir()
                 if p.is_file() and (p.suffix in (".gz", ".zst") or p.name.endswith(".txt")))
-if not assets:
+if not assets and not meta["assets"]:
     sys.exit("no release assets found — run scripts/pack-release-assets.sh first")
 for p in assets:
     data = p.read_bytes()
@@ -61,6 +79,6 @@ for p in assets:
 
 out = rel / "meta.json"
 out.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
-print(f"meta.json: {len(meta['assets'])} assets, libc6={meta['libc6']}, suite={meta['suite']}")
+print(f"meta.json: {len(meta['assets'])} assets ({'partial merge' if meta['partial'] else 'full'}), libc6={meta['libc6']}, suite={meta['suite']}")
 PY
 cat "$REL/meta.json"
