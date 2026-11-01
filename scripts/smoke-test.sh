@@ -36,23 +36,26 @@ mkdir -p "$UNPACK/tree"
 tar -C "$UNPACK/tree" -xf "$UNPACK/rootfs-arm64.tar"
 fi
 
-echo ">> 1/3 Runtime 树存活检查（arm64 容器 + 设备路径）"
+echo ">> 1/3 Runtime 树存活检查（chroot：树自身就是根）"
+# 方法学（首轮 CI 教训）：裸 Debian 树的 ELF 解释器还是标准路径（/lib/ld-...），
+# 路径改写是 app 侧 build-payload.sh 的活——用空镜像按设备路径挂载会因解释器
+# 不在挂载点内而假失败。chroot 让树自己当根，/lib 在树内，检查的是树的真实
+# 存活能力。chroot 在 docker 默认 capability 集内，无需 --privileged。
+# Method (first CI round lesson): the raw Debian tree's ELFs still use standard
+# interpreters (/lib/ld-...) — rewriting to device paths is app-side
+# build-payload.sh's job. Mounting the tree at the device path in an EMPTY image
+# fails because the interpreter is outside the mount. chroot makes the tree its
+# own root so /lib resolves inside it; chroot is within docker's default caps.
 scripts/ensure-binfmt.sh >/dev/null
-docker image inspect fexdroid-empty:arm64 >/dev/null 2>&1 || \
-  tar -cf - --files-from /dev/null | docker import --platform linux/arm64 - fexdroid-empty:arm64 >/dev/null
 TREE="$PWD/$UNPACK/tree"
-# 基础程序可执行：bash 以设备路径运行
 if $HAVE_RUNTIME; then
-docker run --rm --platform linux/arm64 -v "$TREE:$FXD_ROOT" \
-  --entrypoint "$FXD_ROOT/bin/bash" fexdroid-empty:arm64 -euc 'echo alive && test -x /bin/sh' \
-  >/dev/null || fail "runtime tree cannot run bash at the device path"
-# ldconfig 重建缓存（树内 our-ldconfig；来自 Debian 基底，安装到 usr/sbin）
-docker run --rm --platform linux/arm64 -v "$TREE:$FXD_ROOT" \
-  --entrypoint "$FXD_ROOT/usr/sbin/ldconfig" fexdroid-empty:arm64 -X \
-  >/dev/null || fail "ldconfig failed on the runtime tree"
-[[ -s "$UNPACK/tree/etc/ld.so.cache" ]] || fail "ld.so.cache was not produced"
-rm -f "$UNPACK/tree/etc/ld.so.cache"   # 还原：发布的树不带本地生成的缓存
-pass "runtime tree alive (bash + ldconfig at $FXD_ROOT)"
+docker run --rm --platform linux/arm64 -v "$TREE:/smoke-root" \
+  --entrypoint /bin/bash debian:trixie-slim -euc '
+    chroot /smoke-root /bin/bash -euc "echo alive && test -x /bin/sh"
+    chroot /smoke-root /usr/sbin/ldconfig -X
+    test -s /smoke-root/etc/ld.so.cache
+  ' >/dev/null || fail "runtime tree cannot run bash / ldconfig in chroot"
+pass "runtime tree alive (bash + ldconfig in chroot)"
 else
 skip "runtime tree"
 fi
