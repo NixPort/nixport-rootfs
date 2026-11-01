@@ -39,11 +39,16 @@ on:
         default: 'rootfs-latest'
   push:
     branches: ['main']
+    tags: ['v*']
     paths:
       - 'scripts/**'
       - 'patches/**'
       - 'third_party/**'
       - '.github/workflows/supply.yml'
+# tags 触发语义：新 tag 的 push 把指向提交的全部文件计为变更，paths 不会拦截——
+# 打基线 tag（如 v0.1.0）即可全量重建并发布到滚动 release rootfs-latest
+# （TAG 默认值不受 tag 名影响；release 滚动，git tag 只作来源标记，meta.json
+# 的 built_from 记录精确 sha）。
 
 permissions:
   contents: write
