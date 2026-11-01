@@ -83,8 +83,10 @@ jobs:
       - name: Host packages
         run: |
           sudo apt-get update -qq
+          # glslang-tools：Mesa 的 meson 找 glslangValidator（Vulkan 管线校验）。
+          # glslang-tools: Mesa's meson requires glslangValidator (Vulkan pipeline checks).
           sudo apt-get install -y -qq ninja-build ccache zstd pigz libarchive-tools \
-            bison flex file >/dev/null
+            bison flex file glslang-tools >/dev/null
           sudo pip3 install --break-system-packages -q 'meson>=1.4' mako pyyaml packaging
           wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 22 >/dev/null
           sudo apt-get install -y -qq libclang-cpp22-dev libclang-22-dev llvm-22-dev lld-22 >/dev/null
