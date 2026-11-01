@@ -15,7 +15,7 @@ source scripts/config.sh
 source scripts/lib/need-artifact.sh
 
 REL=build/release
-need_artifact "$REL/rootfs-arm64.tar.gz" scripts/pack-release-assets.sh
+need_artifact "$REL/payload-arm64.tar.gz" scripts/pack-release-assets.sh
 
 SUITE="${SUITE:-trixie}"
 PKGS_TXT=build/rootfs/rootfs-arm64.packages.txt
@@ -63,8 +63,12 @@ if base.get("schema") == "nixport.rootfs-meta.v1":
     meta["built_from"] = base.get("built_from", sys.argv[7])
     meta["rebuilt_from"] = sys.argv[7]
 
-assets = sorted(p for p in rel.iterdir()
-                if p.is_file() and (p.suffix in (".gz", ".zst") or p.name.endswith(".txt")))
+# 纳入契约的资产：压缩包、锁定/包清单文本、payload.version/json（app 校验其 sha256）。
+# Contracted assets: archives, lock/package-list texts, payload.version/json.
+def _contracted(name: str) -> bool:
+    return (name.endswith((".gz", ".zst", ".txt"))
+            or name in ("payload.version", "payload.json"))
+assets = sorted(p for p in rel.iterdir() if p.is_file() and _contracted(p.name))
 if not assets and not meta["assets"]:
     sys.exit("no release assets found — run scripts/pack-release-assets.sh first")
 for p in assets:
