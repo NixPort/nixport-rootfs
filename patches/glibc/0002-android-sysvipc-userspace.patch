@@ -1,0 +1,2006 @@
+--- a/sysdeps/unix/sysv/linux/shmget.c
++++ b/sysdeps/unix/sysv/linux/shmget.c
+@@ -19,6 +19,7 @@
+ #include <stddef.h>
+ #include <ipc_priv.h>
+ #include <sysdep.h>
++#include <fxshm.h>
+ 
+ /* Return an identifier for an shared memory segment of at least size SIZE
+    which is associated with KEY.  */
+@@ -26,9 +27,7 @@
+ int
+ shmget (key_t key, size_t size, int shmflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (shmget, key, size, shmflg, NULL);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_shmget, key, size, shmflg, NULL);
+-#endif
++  /* fexdroid: shmget is trapped (SIGSYS) by Android's app seccomp filter;
++     segments are memfds handed out by fxshmd (see fxshm-client.c).  */
++  return __fxshm_get (key, size, shmflg);
+ }
+--- a/sysdeps/unix/sysv/linux/shmat.c
++++ b/sysdeps/unix/sysv/linux/shmat.c
+@@ -18,6 +18,7 @@
+ #include <ipc_priv.h>
+ #include <sysdep.h>
+ #include <errno.h>
++#include <fxshm.h>
+ 
+ /* Attach the shared memory segment associated with SHMID to the data
+    segment of the calling process.  SHMADDR and SHMFLG determine how
+@@ -26,17 +27,7 @@
+ void *
+ shmat (int shmid, const void *shmaddr, int shmflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return (void*) INLINE_SYSCALL_CALL (shmat, shmid, shmaddr, shmflg);
+-#else
+-  unsigned long resultvar;
+-  void *raddr;
+-
+-  resultvar = INTERNAL_SYSCALL_CALL (ipc, IPCOP_shmat, shmid, shmflg,
+-				     &raddr, shmaddr);
+-  if (INTERNAL_SYSCALL_ERROR_P (resultvar))
+-    return (void *) INLINE_SYSCALL_ERROR_RETURN_VALUE (INTERNAL_SYSCALL_ERRNO (resultvar));
+-
+-  return raddr;
+-#endif
++  /* fexdroid: shmat is trapped (SIGSYS) by Android's app seccomp filter;
++     mmap the segment's memfd instead (see fxshm-client.c).  */
++  return __fxshm_at (shmid, shmaddr, shmflg);
+ }
+--- a/sysdeps/unix/sysv/linux/shmdt.c
++++ b/sysdeps/unix/sysv/linux/shmdt.c
+@@ -18,6 +18,7 @@
+ #include <ipc_priv.h>
+ #include <sysdep.h>
+ #include <errno.h>
++#include <fxshm.h>
+ 
+ /* Detach shared memory segment starting at address specified by SHMADDR
+    from the caller's data segment.  */
+@@ -25,9 +26,7 @@
+ int
+ shmdt (const void *shmaddr)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (shmdt, shmaddr);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_shmdt, 0, 0, 0, shmaddr);
+-#endif
++  /* fexdroid: shmdt is trapped (SIGSYS) by Android's app seccomp filter
++     (see fxshm-client.c).  */
++  return __fxshm_dt (shmaddr);
+ }
+--- a/sysdeps/unix/sysv/linux/shmctl.c
++++ b/sysdeps/unix/sysv/linux/shmctl.c
+@@ -22,6 +22,7 @@
+ #include <shlib-compat.h>
+ #include <errno.h>
+ #include <linux/posix_types.h>  /* For __kernel_mode_t.  */
++#include <fxshm.h>
+ 
+ /* POSIX states ipc_perm mode should have type of mode_t.  */
+ _Static_assert (sizeof ((struct shmid_ds){0}.shm_perm.mode)
+@@ -73,12 +74,13 @@
+ static int
+ shmctl_syscall (int shmid, int cmd, shmctl_arg_t *buf)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (shmctl, shmid, cmd | __IPC_64, buf);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_shmctl, shmid, cmd | __IPC_64, 0,
+-			      buf);
+-#endif
++  /* fexdroid: shmctl is trapped (SIGSYS) by Android's app seccomp filter;
++     ask fxshmd instead (see fxshm-client.c).  Only the 64-bit layout, where
++     shmctl_arg_t is struct shmid_ds, is supported.  */
++#if __IPC_TIME64
++# error "fexdroid fxshm: 32-bit time64 shmid_ds translation not implemented"
++#endif
++  return __fxshm_ctl (shmid, cmd & ~__IPC_64, (struct shmid_ds *) buf);
+ }
+ 
+ /* Provide operations to control over shared memory segments.  */
+--- a/sysdeps/unix/sysv/linux/semget.c
++++ b/sysdeps/unix/sysv/linux/semget.c
+@@ -19,6 +19,7 @@
+ #include <ipc_priv.h>
+ #include <sysdep.h>
+ #include <errno.h>
++#include <fxshm.h>
+ 
+ /* Return identifier for array of NSEMS semaphores associated with
+    KEY.  */
+@@ -26,9 +27,7 @@
+ int
+ semget (key_t key, int nsems, int semflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (semget, key, nsems, semflg);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_semget, key, nsems, semflg, NULL);
+-#endif
++  /* fexdroid: semget is trapped (SIGSYS) by Android's app seccomp filter;
++     semaphore sets are memfds handed out by fxshmd (see fxsem-client.c).  */
++  return __fxsem_get (key, nsems, semflg);
+ }
+--- a/sysdeps/unix/sysv/linux/semtimedop.c
++++ b/sysdeps/unix/sysv/linux/semtimedop.c
+@@ -19,19 +19,20 @@
+ #include <ipc_priv.h>
+ #include <sysdep.h>
+ #include <errno.h>
++#include <fxshm.h>
+ 
+ static int
+ semtimedop_syscall (int semid, struct sembuf *sops, size_t nsops,
+ 		    const struct __timespec64 *timeout)
+ {
+-#ifdef __NR_semtimedop_time64
+-  return INLINE_SYSCALL_CALL (semtimedop_time64, semid, sops, nsops, timeout);
+-#elif defined __ASSUME_DIRECT_SYSVIPC_SYSCALLS && defined __NR_semtimedop
+-  return INLINE_SYSCALL_CALL (semtimedop, semid, sops, nsops, timeout);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_semtimedop, semid,
+-			      SEMTIMEDOP_IPC_ARGS (nsops, sops, timeout));
++  /* fexdroid: semtimedop is trapped (SIGSYS) by Android's app seccomp
++     filter; operate on the set's shared mapping (see fxsem-client.c).
++     64-bit time_t only (aarch64): __timespec64 is struct timespec.  */
++#if __TIMESIZE != 64
++# error "fexdroid fxsem: 32-bit time_t not implemented"
+ #endif
++  return __fxsem_timedop (semid, sops, nsops,
++			  (const struct timespec *) timeout);
+ }
+ 
+ /* Perform user-defined atomic operation of array of semaphores.  */
+@@ -58,12 +59,10 @@
+       ts32 = valid_timespec64_to_timespec (*timeout);
+       pts32 = &ts32;
+     }
+-# ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (semtimedop, semid, sops, nsops, pts32);
+-# else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_semtimedop, semid,
+-			      SEMTIMEDOP_IPC_ARGS (nsops, sops, pts32));
+-# endif
++  /* fexdroid: SysV semaphores are trapped (SIGSYS) by Android's app seccomp
++     filter.  Fail without issuing the syscall.  */
++  __set_errno (ENOSYS);
++  return -1;
+ #endif
+ }
+ #if __TIMESIZE != 64
+--- a/sysdeps/unix/sysv/linux/semctl.c
++++ b/sysdeps/unix/sysv/linux/semctl.c
+@@ -21,6 +21,7 @@
+ #include <sysdep.h>
+ #include <shlib-compat.h>
+ #include <linux/posix_types.h>             /* For __kernel_mode_t.  */
++#include <fxshm.h>
+ 
+ /* The struct used to issue the syscall.  For architectures that assume
+    64-bit time as default (!__ASSUME_TIME64_SYSCALLS) the syscall will
+@@ -120,13 +121,13 @@
+ static int
+ semctl_syscall (int semid, int semnum, int cmd, semctl_arg_t arg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (semctl, semid, semnum, cmd | __IPC_64,
+-			      arg.array);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_semctl, semid, semnum, cmd | __IPC_64,
+-			      SEMCTL_ARG_ADDRESS (arg));
+-#endif
++  /* fexdroid: semctl is trapped (SIGSYS) by Android's app seccomp filter;
++     work on the set's shared mapping / ask fxshmd (see fxsem-client.c).
++     Only the 64-bit layout (semctl_arg_t is union semun) is supported.  */
++#if __IPC_TIME64
++# error "fexdroid fxsem: 32-bit time64 semid_ds translation not implemented"
++#endif
++  return __fxsem_ctl (semid, semnum, cmd, (unsigned long int) arg.array);
+ }
+ 
+ /* POSIX states ipc_perm mode should have type of mode_t.  */
+--- a/sysdeps/unix/sysv/linux/msgget.c
++++ b/sysdeps/unix/sysv/linux/msgget.c
+@@ -25,9 +25,8 @@
+ int
+ msgget (key_t key, int msgflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (msgget, key, msgflg);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_msgget, key, msgflg, 0, NULL);
+-#endif
++  /* fexdroid: SysV message queues are trapped (SIGSYS) by Android's app seccomp
++     filter.  Fail without issuing the syscall.  */
++  __set_errno (ENOSYS);
++  return -1;
+ }
+--- a/sysdeps/unix/sysv/linux/msgsnd.c
++++ b/sysdeps/unix/sysv/linux/msgsnd.c
+@@ -17,15 +17,14 @@
+ 
+ #include <ipc_priv.h>
+ #include <sysdep-cancel.h>
++#include <errno.h>
+ 
+ int
+ __libc_msgsnd (int msqid, const void *msgp, size_t msgsz, int msgflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return SYSCALL_CANCEL (msgsnd, msqid, msgp, msgsz, msgflg);
+-#else
+-  return SYSCALL_CANCEL (ipc, IPCOP_msgsnd, msqid, msgsz, msgflg,
+-			 msgp);
+-#endif
++  /* fexdroid: SysV message queues are trapped (SIGSYS) by Android's app seccomp
++     filter.  Fail without issuing the syscall.  */
++  __set_errno (ENOSYS);
++  return -1;
+ }
+ weak_alias (__libc_msgsnd, msgsnd)
+--- a/sysdeps/unix/sysv/linux/msgrcv.c
++++ b/sysdeps/unix/sysv/linux/msgrcv.c
+@@ -17,16 +17,15 @@
+ 
+ #include <ipc_priv.h>
+ #include <sysdep-cancel.h>
++#include <errno.h>
+ 
+ ssize_t
+ __libc_msgrcv (int msqid, void *msgp, size_t msgsz, long int msgtyp,
+ 	       int msgflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return SYSCALL_CANCEL (msgrcv, msqid, msgp, msgsz, msgtyp, msgflg);
+-#else
+-  return SYSCALL_CANCEL (ipc, IPCOP_msgrcv, msqid, msgsz, msgflg,
+-			 MSGRCV_ARGS (msgp, msgtyp));
+-#endif
++  /* fexdroid: SysV message queues are trapped (SIGSYS) by Android's app seccomp
++     filter.  Fail without issuing the syscall.  */
++  __set_errno (ENOSYS);
++  return -1;
+ }
+ weak_alias (__libc_msgrcv, msgrcv)
+--- a/sysdeps/unix/sysv/linux/msgctl.c
++++ b/sysdeps/unix/sysv/linux/msgctl.c
+@@ -74,12 +74,10 @@
+ static int
+ msgctl_syscall (int msqid, int cmd, msgctl_arg_t *buf)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (msgctl, msqid, cmd | __IPC_64, buf);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_msgctl, msqid, cmd | __IPC_64, 0,
+-			      buf);
+-#endif
++  /* fexdroid: SysV message queues are trapped (SIGSYS) by Android's app seccomp
++     filter.  Fail without issuing the syscall.  */
++  __set_errno (ENOSYS);
++  return -1;
+ }
+ 
+ int
+--- a/sysdeps/unix/sysv/linux/Makefile
++++ b/sysdeps/unix/sysv/linux/Makefile
+@@ -44,6 +44,15 @@
+ ifeq ($(subdir),csu)
+ sysdep_routines += \
+   errno-loc \
++  # sysdep_routines
++endif
++
++# fexdroid: userspace SysV shared memory and semaphores (memfd + fxshmd),
++# see fxshm-client.c and fxsem-client.c.
++ifeq ($(subdir),sysvipc)
++sysdep_routines += \
++  fxsem-client \
++  fxshm-client \
+   # sysdep_routines
+ endif
+ 
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/fxshm-proto.h
+@@ -0,0 +1,80 @@
++/* fexdroid: wire protocol between the patched glibc (SysV shm client) and
++   fxshmd, the per-app shared-memory registry daemon.
++
++   Android's app seccomp filter kills processes that issue the SysV IPC
++   syscalls, so glibc's shmget/shmat/shmdt/shmctl are re-implemented on top of
++   memfd_create + a tiny daemon that owns one memfd per segment and hands out
++   duplicates over a unix SOCK_SEQPACKET socket (SCM_RIGHTS).  Semaphore sets
++   (semget/semop/semtimedop/semctl) are memfds from the same daemon.  This header is
++   the single source of truth: tools/fxshmd/fxshmd.c includes it directly and
++   scripts/lib/make-glibc-sysvipc-patch.py copies it into the glibc patch.
++
++   All fields are fixed-width; client and daemon are always built for the same
++   ABI (arm64 rootfs), so no byte-order handling.  */
++#ifndef FXSHM_PROTO_H
++#define FXSHM_PROTO_H 1
++
++#include <stdint.h>
++
++#define FXSHM_PROTO_VERSION 1u
++
++/* Socket and lock file live in this directory under the rootfs /tmp.  */
++#define FXSHM_DIR_NAME  ".fxshm"
++#define FXSHM_SOCK_NAME "sock"
++#define FXSHM_LOCK_NAME "lock"
++
++/* Environment overrides (secure_getenv on the client side).  */
++#define FXSHM_ENV_SOCKET "FXD_SHM_SOCKET"   /* full path of the socket */
++#define FXSHM_ENV_DAEMON "FXD_SHMD"         /* executable to spawn instead of ld.so+fxshmd */
++
++enum fxshm_op
++{
++  FXSHM_OP_PING = 0,
++  FXSHM_OP_GET = 1,      /* shmget: key, size, flags, pid          -> result = id */
++  FXSHM_OP_ATTACH = 2,   /* shmat:  id, flags, pid                 -> fd via SCM_RIGHTS, seg */
++  FXSHM_OP_DETACH = 3,   /* shmdt:  id, pid                        -> 0 */
++  FXSHM_OP_INHERIT = 4,  /* after fork: id, count(size)            -> 0 (no fd) */
++  FXSHM_OP_STAT = 5,     /* shmctl IPC_STAT: id                    -> seg */
++  FXSHM_OP_SET = 6,      /* shmctl IPC_SET:  id, uid, gid, mode    -> 0 */
++  FXSHM_OP_RMID = 7,     /* shmctl IPC_RMID: id                    -> 0 */
++  /* SysV semaphores (layout of a set: fxsem-layout.h).  Sets have their own
++     key and id namespace, as in the kernel.  */
++  FXSHM_OP_SEM_GET = 8,  /* semget: key, size = nsems, flags, pid  -> result = id,
++                            fd via SCM_RIGHTS, seg.segsz = bytes to map */
++  FXSHM_OP_SEM_OPEN = 9, /* id                                    -> fd, seg.segsz */
++  FXSHM_OP_SEM_RMID = 10,/* semctl IPC_RMID: id                   -> 0 (sleepers get EIDRM) */
++  FXSHM_OP_SEM_UNDO = 11,/* pid: apply pid's SEM_UNDO adjustments when this
++                            connection hangs up (process exit/exec)  -> 0 */
++};
++
++struct fxshm_req
++{
++  uint32_t version;   /* FXSHM_PROTO_VERSION */
++  uint32_t op;        /* enum fxshm_op */
++  int32_t id;         /* shmid for ATTACH/DETACH/INHERIT/STAT/SET/RMID */
++  int32_t key;        /* key_t for GET */
++  uint64_t size;      /* GET: requested size; INHERIT: attachment count */
++  int32_t flags;      /* GET: shmflg; ATTACH: shmflg */
++  int32_t pid;        /* caller pid, for shm_cpid/shm_lpid */
++  uint32_t uid, gid, mode;   /* SET */
++};
++
++/* Mirrors the fields of struct shmid_ds.  */
++struct fxshm_seg
++{
++  int32_t key;
++  uint32_t uid, gid, cuid, cgid, mode;
++  uint64_t segsz;
++  int64_t atime, dtime, ctime;
++  int32_t cpid, lpid;
++  uint64_t nattch;
++};
++
++struct fxshm_resp
++{
++  int32_t result;     /* >= 0 on success, -1 on error */
++  int32_t err;        /* errno value when result < 0 */
++  struct fxshm_seg seg;
++};
++
++#endif /* fxshm-proto.h */
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/fxshm-config.h
+@@ -0,0 +1,11 @@
++/* fexdroid: how glibc starts the shared-memory registry daemon when no
++   fxshmd is listening.  scripts/build-glibc.sh rewrites both paths (sed) to
++   the on-device rootfs before building; the socket path itself derives from
++   _PATH_TMP (also rewritten there).  */
++#ifndef _FXSHM_CONFIG_H
++#define _FXSHM_CONFIG_H 1
++
++#define FXSHM_LDSO   "/lib/ld-linux-aarch64.so.1"
++#define FXSHM_DAEMON "/usr/libexec/fxshmd"
++
++#endif /* fxshm-config.h */
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/fxshm.h
+@@ -0,0 +1,32 @@
++/* fexdroid: internal interface of the userspace SysV IPC implementation:
++   shared memory (fxshm-client.c, used by shmget.c, shmat.c, shmdt.c and
++   shmctl.c) and semaphores (fxsem-client.c, used by semget.c, semtimedop.c,
++   semctl.c), plus the syscall() wrapper (aarch64/fxd-syscall.c).  */
++#ifndef _FXSHM_H
++#define _FXSHM_H 1
++
++#include <sys/shm.h>
++#include <sys/sem.h>
++#include <time.h>
++
++extern int __fxshm_get (key_t key, size_t size, int shmflg) attribute_hidden;
++extern void *__fxshm_at (int shmid, const void *shmaddr, int shmflg)
++  attribute_hidden;
++extern int __fxshm_dt (const void *shmaddr) attribute_hidden;
++extern int __fxshm_ctl (int shmid, int cmd, struct shmid_ds *buf)
++  attribute_hidden;
++
++extern int __fxsem_get (key_t key, int nsems, int semflg) attribute_hidden;
++extern int __fxsem_timedop (int semid, struct sembuf *sops, size_t nsops,
++                            const struct timespec *timeout) attribute_hidden;
++/* ARG is the raw union semun value (as passed to the semctl syscall).  */
++extern int __fxsem_ctl (int semid, int semnum, int cmd, unsigned long int arg)
++  attribute_hidden;
++
++struct fxshm_req;
++struct fxshm_resp;
++extern int __fxshm_call (struct fxshm_req *q, struct fxshm_resp *r,
++                         int *fd_out) attribute_hidden;
++extern unsigned int __fxshm_conn_gen attribute_hidden;
++
++#endif /* fxshm.h */
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/fxshm-client.c
+@@ -0,0 +1,578 @@
++/* fexdroid: SysV shared memory without the shm* syscalls.
++   Copyright (C) 2026 fexdroid contributors.  MIT license (fexdroid); this file
++   is added to glibc under the LGPL-2.1-or-later when built into libc.
++
++   Android's app seccomp filter kills a process with SIGSYS when it issues
++   shmget/shmat/shmdt/shmctl.  This file implements them on top of memfds
++   owned by a per-app registry daemon (fxshmd, tools/fxshmd/fxshmd.c):
++
++     shmget  -> GET      the daemon creates/looks up the segment (memfd)
++     shmat   -> ATTACH   the daemon sends a dup of the memfd (SCM_RIGHTS),
++                         we mmap it and remember addr -> id
++     shmdt   -> DETACH   munmap + tell the daemon
++     shmctl  -> STAT/SET/RMID
++
++   The same connection carries the SysV semaphore requests of fxsem-client.c
++   (through __fxshm_call).
++
++   Every process keeps a single SOCK_SEQPACKET connection for its lifetime
++   (CLOEXEC).  The daemon counts attachments per connection, so exit, exec
++   and crashes release them like the kernel would.  After fork() the child
++   gets its own connection (atfork handler) and re-registers the attachments
++   it inherited, keeping shm_nattch and IPC_RMID semantics right.
++
++   Everything here goes through non-cancellable INTERNAL_SYSCALL_CALLs so a
++   pthread_cancel cannot leave the lock held.  */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <paths.h>
++#include <sched.h>
++#include <signal.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/ipc.h>
++#include <sys/mman.h>
++#include <sys/shm.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/wait.h>
++#include <time.h>
++#include <libc-lock.h>
++#include <register-atfork.h>
++#include <not-cancel.h>
++#include <internal-signals.h>
++#include <sysdep.h>
++#include <fxshm-proto.h>
++#include <fxshm-config.h>
++#include <fxshm.h>
++
++#ifndef MAP_FIXED_NOREPLACE
++# define MAP_FIXED_NOREPLACE 0x100000
++#endif
++
++struct attachment
++{
++  void *addr;
++  size_t len;
++  int id;
++  struct attachment *next;
++};
++
++__libc_lock_define_initialized (static, lock);
++__libc_once_define (static, once);
++static int conn_fd = -1;
++static pid_t conn_pid;
++static struct attachment *attachments;
++/* Bumped whenever the daemon connection is lost: objects cached from the old
++   daemon (semaphore set mappings) must not be matched by id any more.  */
++unsigned int __fxshm_conn_gen;
++
++/* ---- connection ----------------------------------------------------------- */
++
++static const char *
++socket_path (char *buf, size_t len)
++{
++  const char *env = __libc_secure_getenv (FXSHM_ENV_SOCKET);
++  if (env != NULL && *env != '\0')
++    return env;
++  __snprintf (buf, len, "%s%s/%s", _PATH_TMP, FXSHM_DIR_NAME, FXSHM_SOCK_NAME);
++  return buf;
++}
++
++static int
++try_connect (const char *path)
++{
++  struct sockaddr_un sa;
++  memset (&sa, 0, sizeof sa);
++  sa.sun_family = AF_UNIX;
++  if (strlen (path) >= sizeof sa.sun_path)
++    {
++      __set_errno (ENAMETOOLONG);
++      return -1;
++    }
++  strcpy (sa.sun_path, path);
++  int fd = __socket (AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
++  if (fd < 0)
++    return -1;
++  int r = INTERNAL_SYSCALL_CALL (connect, fd, &sa, sizeof sa);
++  if (INTERNAL_SYSCALL_ERROR_P (r))
++    {
++      __close_nocancel (fd);
++      __set_errno (INTERNAL_SYSCALL_ERRNO (r));
++      return -1;
++    }
++  return fd;
++}
++
++static int
++spawn_child (void *arg)
++{
++  char *const *argv = arg;
++  __execve (argv[0], argv, __environ);
++  _exit (127);
++}
++
++/* Start fxshmd.  It daemonizes itself and its first process exits 0 only once
++   the socket is listening, so on return we can connect right away.  The child
++   is created like posix_spawn does (CLONE_VM|CLONE_VFORK|SIGCHLD: qemu-user
++   rejects other flag combinations); the application therefore sees one
++   SIGCHLD and, if its handler reaps with wait(-1), our wait4 gets ECHILD,
++   which is treated as success (the connect retries cover the rest).  */
++static int
++spawn_daemon (void)
++{
++  const char *custom = __libc_secure_getenv (FXSHM_ENV_DAEMON);
++  char *argv[3];
++  if (custom != NULL && *custom != '\0')
++    {
++      argv[0] = (char *) custom;
++      argv[1] = NULL;
++    }
++  else
++    {
++      argv[0] = (char *) FXSHM_LDSO;
++      argv[1] = (char *) FXSHM_DAEMON;
++      argv[2] = NULL;
++    }
++  const size_t stack_size = 64 * 1024;
++  void *stack = __mmap (NULL, stack_size, PROT_READ | PROT_WRITE,
++                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
++  if (stack == MAP_FAILED)
++    return -1;
++  /* The child shares our memory until it execs: keep signal handlers from
++     running in it.  The daemon unblocks everything at startup.  */
++  internal_sigset_t oldmask;
++  internal_signal_block_all (&oldmask);
++  int pid = __clone (spawn_child, (char *) stack + stack_size,
++                     CLONE_VM | CLONE_VFORK | SIGCHLD, argv);
++  int saved = errno;
++  internal_signal_restore_set (&oldmask);
++  __munmap (stack, stack_size);
++  if (pid < 0)
++    {
++      __set_errno (saved);
++      return -1;
++    }
++  int status = 0;
++  for (;;)
++    {
++      int r = INTERNAL_SYSCALL_CALL (wait4, pid, &status, 0, NULL);
++      if (!INTERNAL_SYSCALL_ERROR_P (r))
++        break;
++      if (INTERNAL_SYSCALL_ERRNO (r) == ECHILD)
++        return 0;
++      if (INTERNAL_SYSCALL_ERRNO (r) != EINTR)
++        return -1;
++    }
++  return (WIFEXITED (status) && WEXITSTATUS (status) == 0) ? 0 : -1;
++}
++
++static void
++sleep_ms (int ms)
++{
++  struct __timespec64 ts = { .tv_sec = 0, .tv_nsec = (long) ms * 1000000 };
++  INTERNAL_SYSCALL_CALL (clock_nanosleep, CLOCK_MONOTONIC, 0, &ts, NULL);
++}
++
++static int transact (const struct fxshm_req *q, struct fxshm_resp *r,
++                     int *fd_out);
++
++/* After a new connection in a process that already has attachments (fork
++   child, or a reconnect), tell the daemon about them.  */
++static void
++reinherit (void)
++{
++  for (struct attachment *a = attachments; a != NULL; a = a->next)
++    {
++      /* Send one INHERIT per id, counting duplicates once.  */
++      bool seen = false;
++      for (struct attachment *b = attachments; b != a; b = b->next)
++        if (b->id == a->id)
++          {
++            seen = true;
++            break;
++          }
++      if (seen)
++        continue;
++      uint64_t count = 0;
++      for (struct attachment *b = a; b != NULL; b = b->next)
++        if (b->id == a->id)
++          count++;
++      struct fxshm_req q = { .version = FXSHM_PROTO_VERSION,
++                             .op = FXSHM_OP_INHERIT, .id = a->id,
++                             .size = count, .pid = conn_pid };
++      struct fxshm_resp r;
++      transact (&q, &r, NULL);   /* the segment may already be gone; fine */
++    }
++}
++
++/* Called with LOCK held.  Returns 0 with conn_fd usable, else -1/errno.  */
++static int
++ensure_conn (void)
++{
++  pid_t pid = __getpid ();
++  if (conn_fd >= 0 && conn_pid == pid)
++    return 0;
++  if (conn_fd >= 0)
++    {
++      /* Inherited across a fork that bypassed our atfork handler (_Fork,
++         raw clone): the parent's connection is not ours to use.  */
++      __close_nocancel (conn_fd);
++      conn_fd = -1;
++    }
++  char buf[sizeof ((struct sockaddr_un *) 0)->sun_path];
++  const char *path = socket_path (buf, sizeof buf);
++  bool spawned = false;
++  for (int attempt = 0; attempt < 200; attempt++)
++    {
++      int fd = try_connect (path);
++      if (fd >= 0)
++        {
++          conn_fd = fd;
++          conn_pid = pid;
++          if (attachments != NULL)
++            reinherit ();
++          return 0;
++        }
++      if (errno != ENOENT && errno != ECONNREFUSED)
++        return -1;
++      if (!spawned)
++        {
++          spawned = true;
++          spawn_daemon ();   /* failure is not fatal: another process may win */
++          continue;
++        }
++      sleep_ms (10);
++    }
++  __set_errno (ENOSYS);
++  return -1;
++}
++
++/* Called with LOCK held.  Returns 0 and fills *R (result >= 0), or -1 with
++   errno set (both for transport errors and for r->err).  */
++static int
++transact (const struct fxshm_req *q, struct fxshm_resp *r, int *fd_out)
++{
++  if (ensure_conn () < 0)
++    return -1;
++  for (;;)
++    {
++      int n = INTERNAL_SYSCALL_CALL (sendto, conn_fd, q, sizeof *q,
++                                     MSG_NOSIGNAL, NULL, 0);
++      if (!INTERNAL_SYSCALL_ERROR_P (n))
++        break;
++      if (INTERNAL_SYSCALL_ERRNO (n) == EINTR)
++        continue;
++      goto lost;
++    }
++  struct iovec iov = { .iov_base = r, .iov_len = sizeof *r };
++  union { struct cmsghdr h; char buf[CMSG_SPACE (sizeof (int))]; } u;
++  memset (&u, 0, sizeof u);
++  struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1,
++                       .msg_control = u.buf, .msg_controllen = sizeof u.buf };
++  ssize_t n;
++  for (;;)
++    {
++      n = INTERNAL_SYSCALL_CALL (recvmsg, conn_fd, &mh, MSG_CMSG_CLOEXEC);
++      if (!INTERNAL_SYSCALL_ERROR_P (n))
++        break;
++      if (INTERNAL_SYSCALL_ERRNO (n) == EINTR)
++        continue;
++      goto lost;
++    }
++  if (n != sizeof *r)
++    goto lost;
++  int fd = -1;
++  for (struct cmsghdr *cm = CMSG_FIRSTHDR (&mh); cm != NULL;
++       cm = CMSG_NXTHDR (&mh, cm))
++    if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS
++        && cm->cmsg_len == CMSG_LEN (sizeof (int)))
++      memcpy (&fd, CMSG_DATA (cm), sizeof (int));
++  if (r->result < 0)
++    {
++      if (fd >= 0)
++        __close_nocancel (fd);
++      __set_errno (r->err);
++      return -1;
++    }
++  if (fd_out != NULL)
++    *fd_out = fd;
++  else if (fd >= 0)
++    __close_nocancel (fd);
++  return 0;
++
++lost:
++  /* The daemon went away: drop the connection so the next call restarts
++     it.  Segments it held are gone, as after a reboot.  */
++  __close_nocancel (conn_fd);
++  conn_fd = -1;
++  __atomic_fetch_add (&__fxshm_conn_gen, 1, __ATOMIC_RELEASE);
++  __set_errno (EIDRM);
++  return -1;
++}
++
++/* ---- fork handling -------------------------------------------------------- */
++
++static void
++fork_prepare (void)
++{
++  __libc_lock_lock (lock);
++}
++
++static void
++fork_parent (void)
++{
++  __libc_lock_unlock (lock);
++}
++
++static void
++fork_child (void)
++{
++  __libc_lock_init (lock);
++  if (conn_fd >= 0)
++    {
++      __close_nocancel (conn_fd);
++      conn_fd = -1;
++    }
++  /* Re-register inherited attachments now, before the parent can detach
++     and destroy the segment under us.  */
++  if (attachments != NULL)
++    {
++      __libc_lock_lock (lock);
++      ensure_conn ();
++      __libc_lock_unlock (lock);
++    }
++}
++
++static void
++init_once (void)
++{
++  /* Registered outside LOCK: prefork handlers run with the atfork lock
++     held, and __register_atfork takes that same lock.  */
++  __register_atfork (fork_prepare, fork_parent, fork_child, NULL);
++}
++
++/* ---- internal entry point for fxsem-client.c ------------------------------ */
++
++/* One request/response on this process's daemon connection.  Q->pid is
++   filled in.  Returns 0 (R->result >= 0; *FD_OUT = received fd or -1) or -1
++   with errno set.  */
++int
++__fxshm_call (struct fxshm_req *q, struct fxshm_resp *r, int *fd_out)
++{
++  __libc_once (once, init_once);
++  if (fd_out != NULL)
++    *fd_out = -1;
++  __libc_lock_lock (lock);
++  q->version = FXSHM_PROTO_VERSION;
++  q->pid = __getpid ();
++  int ret = transact (q, r, fd_out);
++  __libc_lock_unlock (lock);
++  return ret;
++}
++
++/* ---- public entry points (called from shm*.c) ----------------------------- */
++
++int
++__fxshm_get (key_t key, size_t size, int shmflg)
++{
++  __libc_once (once, init_once);
++  struct fxshm_req q = { .version = FXSHM_PROTO_VERSION, .op = FXSHM_OP_GET,
++                         .key = key, .size = size, .flags = shmflg };
++  struct fxshm_resp r;
++  __libc_lock_lock (lock);
++  q.pid = __getpid ();
++  int ret = transact (&q, &r, NULL) < 0 ? -1 : r.result;
++  __libc_lock_unlock (lock);
++  return ret;
++}
++
++static void
++detach_locked (int id)
++{
++  struct fxshm_req q = { .version = FXSHM_PROTO_VERSION, .op = FXSHM_OP_DETACH,
++                         .id = id, .pid = __getpid () };
++  struct fxshm_resp r;
++  int saved = errno;
++  transact (&q, &r, NULL);
++  __set_errno (saved);
++}
++
++void *
++__fxshm_at (int shmid, const void *shmaddr, int shmflg)
++{
++  __libc_once (once, init_once);
++  size_t pagesize = __getpagesize ();
++  uintptr_t want = 0;
++  if (shmaddr != NULL)
++    {
++      want = (uintptr_t) shmaddr;
++      if (shmflg & SHM_RND)
++        want &= ~(uintptr_t) (SHMLBA - 1);
++      else if (want & (SHMLBA - 1))
++        {
++          __set_errno (EINVAL);
++          return (void *) -1;
++        }
++    }
++  struct attachment *a = malloc (sizeof *a);
++  if (a == NULL)
++    return (void *) -1;
++
++  struct fxshm_req q = { .version = FXSHM_PROTO_VERSION, .op = FXSHM_OP_ATTACH,
++                         .id = shmid, .flags = shmflg };
++  struct fxshm_resp r;
++  int fd = -1;
++  __libc_lock_lock (lock);
++  q.pid = __getpid ();
++  if (transact (&q, &r, &fd) < 0 || fd < 0)
++    {
++      if (fd >= 0)
++        __close_nocancel (fd);
++      __libc_lock_unlock (lock);
++      free (a);
++      return (void *) -1;
++    }
++  size_t len = (r.seg.segsz + pagesize - 1) & ~(pagesize - 1);
++  int prot = PROT_READ;
++  if (!(shmflg & SHM_RDONLY))
++    prot |= PROT_WRITE;
++  if (shmflg & SHM_EXEC)
++    prot |= PROT_EXEC;
++  int flags = MAP_SHARED;
++  if (want != 0)
++    flags |= MAP_FIXED_NOREPLACE;
++  void *p = __mmap ((void *) want, len, prot, flags, fd, 0);
++  __close_nocancel (fd);
++  if (p != MAP_FAILED && want != 0 && p != (void *) want)
++    {
++      /* Old kernel that ignores MAP_FIXED_NOREPLACE and gave us a hint.  */
++      __munmap (p, len);
++      p = MAP_FAILED;
++      __set_errno (EINVAL);
++    }
++  if (p == MAP_FAILED)
++    {
++      int saved = errno;
++      detach_locked (shmid);
++      __libc_lock_unlock (lock);
++      free (a);
++      __set_errno (saved == EEXIST ? EINVAL : saved);
++      return (void *) -1;
++    }
++  a->addr = p;
++  a->len = len;
++  a->id = shmid;
++  a->next = attachments;
++  attachments = a;
++  __libc_lock_unlock (lock);
++  return p;
++}
++
++int
++__fxshm_dt (const void *shmaddr)
++{
++  __libc_once (once, init_once);
++  __libc_lock_lock (lock);
++  struct attachment **pp = &attachments;
++  while (*pp != NULL && (*pp)->addr != shmaddr)
++    pp = &(*pp)->next;
++  struct attachment *a = *pp;
++  if (a == NULL)
++    {
++      __libc_lock_unlock (lock);
++      __set_errno (EINVAL);
++      return -1;
++    }
++  *pp = a->next;
++  __munmap (a->addr, a->len);
++  detach_locked (a->id);
++  __libc_lock_unlock (lock);
++  free (a);
++  return 0;
++}
++
++int
++__fxshm_ctl (int shmid, int cmd, struct shmid_ds *buf)
++{
++  __libc_once (once, init_once);
++  struct fxshm_req q = { .version = FXSHM_PROTO_VERSION, .id = shmid };
++  struct fxshm_resp r;
++  switch (cmd)
++    {
++    case IPC_STAT:
++    case SHM_LOCK:
++    case SHM_UNLOCK:
++      q.op = FXSHM_OP_STAT;
++      if (cmd == IPC_STAT && buf == NULL)
++        {
++          __set_errno (EFAULT);
++          return -1;
++        }
++      break;
++    case IPC_SET:
++      if (buf == NULL)
++        {
++          __set_errno (EFAULT);
++          return -1;
++        }
++      q.op = FXSHM_OP_SET;
++      q.uid = buf->shm_perm.uid;
++      q.gid = buf->shm_perm.gid;
++      q.mode = buf->shm_perm.mode;
++      break;
++    case IPC_RMID:
++      q.op = FXSHM_OP_RMID;
++      break;
++    case IPC_INFO:
++      {
++        /* Static limits, enough for ipcs(1) and sanity checks.  */
++        struct shminfo *si = (struct shminfo *) buf;
++        if (si == NULL)
++          {
++            __set_errno (EFAULT);
++            return -1;
++          }
++        memset (si, 0, sizeof *si);
++        si->shmmax = (__syscall_ulong_t) 1 << 40;
++        si->shmmin = 1;
++        si->shmmni = 4096;
++        si->shmseg = 4096;
++        si->shmall = ((__syscall_ulong_t) 1 << 40) / __getpagesize ();
++        return 0;
++      }
++    default:
++      /* SHM_STAT, SHM_STAT_ANY, SHM_INFO: not supported.  */
++      __set_errno (EINVAL);
++      return -1;
++    }
++  __libc_lock_lock (lock);
++  q.pid = __getpid ();
++  int ret = transact (&q, &r, NULL);
++  __libc_lock_unlock (lock);
++  if (ret < 0)
++    return -1;
++  if (cmd == IPC_STAT)
++    {
++      memset (buf, 0, sizeof *buf);
++      buf->shm_perm.__key = r.seg.key;
++      buf->shm_perm.uid = r.seg.uid;
++      buf->shm_perm.gid = r.seg.gid;
++      buf->shm_perm.cuid = r.seg.cuid;
++      buf->shm_perm.cgid = r.seg.cgid;
++      buf->shm_perm.mode = r.seg.mode;
++      buf->shm_segsz = r.seg.segsz;
++      buf->shm_atime = r.seg.atime;
++      buf->shm_dtime = r.seg.dtime;
++      buf->shm_ctime = r.seg.ctime;
++      buf->shm_cpid = r.seg.cpid;
++      buf->shm_lpid = r.seg.lpid;
++      buf->shm_nattch = r.seg.nattch;
++    }
++  return 0;
++}
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/fxsem-layout.h
+@@ -0,0 +1,205 @@
++/* fexdroid: memory layout of a userspace SysV semaphore set, shared by the
++   patched glibc (patches/glibc/fxshm/fxsem-client.c) and fxshmd.
++
++   Android's app seccomp filter kills processes that issue semget/semop/
++   semtimedop/semctl, so every semaphore set is a memfd created by fxshmd and
++   mapped MAP_SHARED by every process that uses it.  All state lives in that
++   mapping; semop is done entirely in the calling process under a lock word in
++   the mapping, blocking waits are FUTEX_WAIT on a sequence word (non-private
++   futexes: the mapping is shared between processes).  fxshmd only creates,
++   looks up and removes sets, and applies SEM_UNDO adjustments when a process
++   goes away (it sees the hangup of the per-process connection).
++
++   This header is the single source of truth: fxshmd.c includes it directly and
++   scripts/lib/make-glibc-sysvipc-patch.py copies it into the glibc patch.
++
++   The includer must define, before using the lock helpers:
++     static long fxsem_sys_futex (uint32_t *uaddr, int op, uint32_t val,
++                                  const struct timespec *rel_timeout);
++         -> raw result: >= 0, or -errno
++     static int fxsem_sys_alive (int32_t pid);
++         -> 0 only when PID certainly does not exist any more (ESRCH)  */
++#ifndef FXSEM_LAYOUT_H
++#define FXSEM_LAYOUT_H 1
++
++#include <errno.h>
++#include <stdint.h>
++#include <stddef.h>
++#include <time.h>
++
++#define FXSEM_MAGIC 0x4d534846u        /* "FHSM" */
++
++/* Limits (reported by semctl IPC_INFO, enforced by semget/semop).  */
++#define FXSEM_SEMMSL 32000             /* semaphores per set */
++#define FXSEM_SEMMNI 32000             /* sets */
++#define FXSEM_SEMOPM 500               /* operations per semop call */
++#define FXSEM_SEMVMX 32767             /* maximum semaphore value */
++#define FXSEM_SEMAEM FXSEM_SEMVMX      /* maximum SEM_UNDO adjustment */
++/* Processes that can hold SEM_UNDO adjustments on one set at the same time.
++   A slot whose adjustments are all zero is recycled.  */
++#define FXSEM_UNDO_SLOTS 64
++
++#define FXSEM_LOCK_WAITERS 0x80000000u
++
++#ifndef FUTEX_WAIT
++# define FUTEX_WAIT 0
++#endif
++#ifndef FUTEX_WAKE
++# define FUTEX_WAKE 1
++#endif
++
++struct fxsem_sem
++{
++  int32_t val;        /* semval */
++  int32_t pid;        /* sempid: last process that changed it */
++  int32_t ncnt;       /* semncnt: waiting for val to increase */
++  int32_t zcnt;       /* semzcnt: waiting for val to become 0 */
++};
++
++struct fxsem_hdr
++{
++  uint32_t magic;     /* FXSEM_MAGIC once initialised by fxshmd */
++  uint32_t lock;      /* 0 = free, else holder pid [| FXSEM_LOCK_WAITERS] */
++  uint32_t seq;       /* futex word, bumped under the lock on every change */
++  uint32_t waiters;   /* threads sleeping on seq */
++  uint32_t removed;   /* IPC_RMID done: sleepers return EIDRM */
++  int32_t id;
++  int32_t key;
++  int32_t nsems;
++  uint32_t uid, gid, cuid, cgid, mode, pad;
++  int64_t otime, ctime;
++  int32_t undo_pid[FXSEM_UNDO_SLOTS];   /* 0 = free slot */
++  /* followed by:
++       struct fxsem_sem sems[nsems];
++       int32_t adj[FXSEM_UNDO_SLOTS][nsems];   semadj per undo slot  */
++};
++
++static inline struct fxsem_sem *
++fxsem_sems (struct fxsem_hdr *h)
++{
++  return (struct fxsem_sem *) (h + 1);
++}
++
++static inline int32_t *
++fxsem_adj (struct fxsem_hdr *h, int slot)
++{
++  return (int32_t *) (fxsem_sems (h) + h->nsems) + (size_t) slot * h->nsems;
++}
++
++/* Bytes needed for a set of NSEMS semaphores (before page rounding).  */
++static inline uint64_t
++fxsem_size (int32_t nsems)
++{
++  return sizeof (struct fxsem_hdr) + (uint64_t) nsems * sizeof (struct fxsem_sem)
++         + (uint64_t) FXSEM_UNDO_SLOTS * nsems * sizeof (int32_t);
++}
++
++static long fxsem_sys_futex (uint32_t *uaddr, int op, uint32_t val,
++                             const struct timespec *rel_timeout);
++static int fxsem_sys_alive (int32_t pid);
++
++/* Process-shared lock.  The holder's pid is stored so that a waiter can take
++   the lock over when the holder was killed inside the (short, syscall-free)
++   critical section: there are no robust futexes (set_robust_list is trapped
++   by Android's seccomp filter too).  */
++static inline void
++fxsem_lock (struct fxsem_hdr *h, uint32_t self)
++{
++  uint32_t cur = 0;
++  if (__atomic_compare_exchange_n (&h->lock, &cur, self, 0, __ATOMIC_ACQUIRE,
++                                   __ATOMIC_RELAXED))
++    return;
++  for (;;)
++    {
++      if (cur == 0)
++        {
++          /* We have been contended: keep the waiters bit so that the
++             unlock wakes whoever else is sleeping.  */
++          if (__atomic_compare_exchange_n (&h->lock, &cur,
++                                           self | FXSEM_LOCK_WAITERS, 0,
++                                           __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
++            return;
++          continue;
++        }
++      if (!(cur & FXSEM_LOCK_WAITERS))
++        {
++          if (!__atomic_compare_exchange_n (&h->lock, &cur,
++                                            cur | FXSEM_LOCK_WAITERS, 0,
++                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++            continue;
++          cur |= FXSEM_LOCK_WAITERS;
++        }
++      struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
++      long r = fxsem_sys_futex (&h->lock, FUTEX_WAIT, cur, &ts);
++      if (r == -ETIMEDOUT)
++        {
++          uint32_t owner = cur & ~FXSEM_LOCK_WAITERS;
++          if (owner != self && !fxsem_sys_alive ((int32_t) owner)
++              && __atomic_compare_exchange_n (&h->lock, &cur,
++                                              self | FXSEM_LOCK_WAITERS, 0,
++                                              __ATOMIC_ACQUIRE,
++                                              __ATOMIC_RELAXED))
++            return;   /* holder died with the lock held: take it over */
++        }
++      cur = __atomic_load_n (&h->lock, __ATOMIC_RELAXED);
++    }
++}
++
++static inline void
++fxsem_unlock (struct fxsem_hdr *h)
++{
++  if (__atomic_exchange_n (&h->lock, 0, __ATOMIC_RELEASE) & FXSEM_LOCK_WAITERS)
++    fxsem_sys_futex (&h->lock, FUTEX_WAKE, 1, NULL);
++}
++
++/* Called under the lock after any change sleepers may care about.  Returns
++   true if sleepers must be woken (fxsem_wake_all, after unlocking).  */
++static inline int
++fxsem_changed (struct fxsem_hdr *h)
++{
++  __atomic_store_n (&h->seq, h->seq + 1, __ATOMIC_RELEASE);
++  return h->waiters != 0;
++}
++
++static inline void
++fxsem_wake_all (struct fxsem_hdr *h)
++{
++  fxsem_sys_futex (&h->seq, FUTEX_WAKE, 0x7fffffff, NULL);
++}
++
++/* Applies and clears the SEM_UNDO adjustments of PID (process exit).  Called
++   under the lock; returns fxsem_changed()'s verdict, or 0 if nothing
++   changed.  */
++static inline int
++fxsem_apply_undo (struct fxsem_hdr *h, int32_t pid)
++{
++  int wake = 0;
++  for (int slot = 0; slot < FXSEM_UNDO_SLOTS; slot++)
++    {
++      if (h->undo_pid[slot] != pid)
++        continue;
++      int32_t *adj = fxsem_adj (h, slot);
++      struct fxsem_sem *s = fxsem_sems (h);
++      int changed = 0;
++      for (int32_t i = 0; i < h->nsems; i++)
++        {
++          if (adj[i] == 0)
++            continue;
++          int64_t v = (int64_t) s[i].val + adj[i];
++          if (v < 0)
++            v = 0;
++          if (v > FXSEM_SEMVMX)
++            v = FXSEM_SEMVMX;
++          s[i].val = (int32_t) v;
++          s[i].pid = pid;
++          adj[i] = 0;
++          changed = 1;
++        }
++      h->undo_pid[slot] = 0;
++      if (changed)
++        wake |= fxsem_changed (h);
++    }
++  return wake;
++}
++
++#endif /* fxsem-layout.h */
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/fxsem-client.c
+@@ -0,0 +1,774 @@
++/* fexdroid: SysV semaphores without the sem* syscalls.
++   Copyright (C) 2026 fexdroid contributors.  MIT license (fexdroid); this file
++   is added to glibc under the LGPL-2.1-or-later when built into libc.
++
++   Android's app seccomp filter kills a process with SIGSYS when it issues
++   semget/semop/semtimedop/semctl.  Every semaphore set here is a memfd
++   created by fxshmd (tools/fxshmd/fxshmd.c) and mapped MAP_SHARED by each
++   process that uses it; the layout is in fxsem-layout.h.
++
++     semget      -> SEM_GET   the daemon creates/looks up the set and passes
++                              its memfd, which we map and cache by id
++     semop,
++     semtimedop  -> no daemon round trip: all operations are applied
++                    atomically under the set's process-shared lock; sleepers
++                    wait with FUTEX_WAIT_BITSET on the set's sequence word
++     semctl      -> IPC_RMID goes to the daemon (SEM_RMID, sleepers get
++                    EIDRM); everything else is done in the mapping
++
++   SEM_UNDO: adjustments are kept per process (pid) in the mapping, updated
++   atomically with the operation.  The first SEM_UNDO operation of a process
++   registers its pid on its daemon connection (SEM_UNDO op); when that
++   connection hangs up (exit, crash, or exec without re-registering) fxshmd
++   applies the adjustments like the kernel's exit_sem.
++
++   Only futex, kill(pid, 0), getpid, clock_gettime, mmap/munmap and the
++   daemon socket are used.  None of it is a cancellation point.  */
++
++#include <errno.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ipc.h>
++#include <sys/mman.h>
++#include <sys/sem.h>
++#include <time.h>
++#include <unistd.h>
++#include <libc-lock.h>
++#include <register-atfork.h>
++#include <not-cancel.h>
++#include <sysdep.h>
++#include <fxshm-proto.h>
++#include <fxsem-layout.h>
++#include <fxshm.h>
++
++#ifndef FUTEX_WAIT_BITSET
++# define FUTEX_WAIT_BITSET 9
++#endif
++#ifndef FUTEX_BITSET_MATCH_ANY
++# define FUTEX_BITSET_MATCH_ANY 0xffffffff
++#endif
++
++/* semctl's IPC_64 flag (0x100); callers such as FEX's i386 ipc() emulation
++   may leave it in CMD.  */
++#define FXSEM_IPC_64 0x100
++
++static long
++fxsem_sys_futex (uint32_t *uaddr, int op, uint32_t val,
++                 const struct timespec *rel_timeout)
++{
++  return INTERNAL_SYSCALL_CALL (futex, uaddr, op, val, rel_timeout, NULL, 0);
++}
++
++static int
++fxsem_sys_alive (int32_t pid)
++{
++  long r = INTERNAL_SYSCALL_CALL (kill, pid, 0);
++  return !(INTERNAL_SYSCALL_ERROR_P (r) && INTERNAL_SYSCALL_ERRNO (r) == ESRCH);
++}
++
++static int64_t
++now_realtime (void)
++{
++  struct timespec ts;
++  __clock_gettime (CLOCK_REALTIME, &ts);
++  return ts.tv_sec;
++}
++
++/* ---- per-process cache of mapped sets ------------------------------------ */
++
++struct semmap
++{
++  int id;
++  unsigned int gen;       /* __fxshm_conn_gen when mapped */
++  struct fxsem_hdr *h;
++  size_t size;
++  unsigned int users;     /* callers currently using H (under cache_lock) */
++  bool dead;              /* unlinked; unmapped when USERS drops to 0 */
++  struct semmap *next;
++};
++
++__libc_lock_define_initialized (static, cache_lock);
++__libc_once_define (static, once);
++static struct semmap *cache;
++static pid_t undo_pid;          /* pid registered for SEM_UNDO ... */
++static unsigned int undo_gen;   /* ... on this daemon connection generation */
++
++static void
++fork_prepare (void)
++{
++  __libc_lock_lock (cache_lock);
++}
++
++static void
++fork_parent (void)
++{
++  __libc_lock_unlock (cache_lock);
++}
++
++static void
++fork_child (void)
++{
++  /* The mappings are inherited (MAP_SHARED); threads that were using them
++     do not exist here, so their USERS references just keep the mappings.  */
++  __libc_lock_init (cache_lock);
++}
++
++static void
++init_once (void)
++{
++  __register_atfork (fork_prepare, fork_parent, fork_child, NULL);
++}
++
++static struct semmap *
++cache_find_locked (int id, unsigned int gen)
++{
++  for (struct semmap *m = cache; m != NULL; m = m->next)
++    if (m->id == id && m->gen == gen)
++      return m;
++  return NULL;
++}
++
++static struct semmap *
++cache_get (int id)
++{
++  unsigned int gen = __atomic_load_n (&__fxshm_conn_gen, __ATOMIC_ACQUIRE);
++  __libc_lock_lock (cache_lock);
++  struct semmap *m = cache_find_locked (id, gen);
++  if (m != NULL)
++    m->users++;
++  __libc_lock_unlock (cache_lock);
++  return m;
++}
++
++static void
++cache_put (struct semmap *m)
++{
++  __libc_lock_lock (cache_lock);
++  bool release = --m->users == 0 && m->dead;
++  __libc_lock_unlock (cache_lock);
++  if (release)
++    {
++      __munmap (m->h, m->size);
++      free (m);
++    }
++}
++
++/* The set was removed: forget it (the mapping goes with the last user).  */
++static void
++cache_kill (struct semmap *m)
++{
++  __libc_lock_lock (cache_lock);
++  if (!m->dead)
++    {
++      struct semmap **pp = &cache;
++      while (*pp != NULL && *pp != m)
++        pp = &(*pp)->next;
++      if (*pp == m)
++        *pp = m->next;
++      m->dead = true;
++    }
++  __libc_lock_unlock (cache_lock);
++}
++
++/* Maps the set ID from FD (SIZE bytes) and caches it.  Returns it with a
++   reference, or NULL with errno set.  */
++static struct semmap *
++cache_insert_fd (int id, int fd, uint64_t size)
++{
++  unsigned int gen = __atomic_load_n (&__fxshm_conn_gen, __ATOMIC_ACQUIRE);
++  struct semmap *m = cache_get (id);
++  if (m != NULL)
++    return m;
++  if (size < sizeof (struct fxsem_hdr) || size > ((uint64_t) 1 << 40))
++    {
++      __set_errno (EINVAL);
++      return NULL;
++    }
++  void *p = __mmap (NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++  if (p == MAP_FAILED)
++    return NULL;
++  struct fxsem_hdr *h = p;
++  if (__atomic_load_n (&h->magic, __ATOMIC_ACQUIRE) != FXSEM_MAGIC
++      || h->id != id || h->nsems <= 0
++      || fxsem_size (h->nsems) > size)
++    {
++      __munmap (p, size);
++      __set_errno (EINVAL);
++      return NULL;
++    }
++  struct semmap *n = malloc (sizeof *n);
++  if (n == NULL)
++    {
++      __munmap (p, size);
++      return NULL;
++    }
++  n->id = id;
++  n->gen = gen;
++  n->h = h;
++  n->size = size;
++  n->users = 1;
++  n->dead = false;
++  __libc_lock_lock (cache_lock);
++  m = cache_find_locked (id, gen);
++  if (m != NULL)
++    m->users++;              /* another thread won the race */
++  else
++    {
++      n->next = cache;
++      cache = n;
++    }
++  __libc_lock_unlock (cache_lock);
++  if (m != NULL)
++    {
++      __munmap (p, size);
++      free (n);
++      return m;
++    }
++  return n;
++}
++
++/* The mapping of set SEMID, with a reference (cache_put), or NULL/errno.  */
++static struct semmap *
++acquire (int semid)
++{
++  __libc_once (once, init_once);
++  if (semid < 0)
++    {
++      __set_errno (EINVAL);
++      return NULL;
++    }
++  struct semmap *m = cache_get (semid);
++  if (m != NULL)
++    return m;
++  struct fxshm_req q = { .op = FXSHM_OP_SEM_OPEN, .id = semid };
++  struct fxshm_resp r;
++  int fd;
++  if (__fxshm_call (&q, &r, &fd) < 0)
++    return NULL;
++  if (fd < 0)
++    {
++      __set_errno (EINVAL);
++      return NULL;
++    }
++  m = cache_insert_fd (semid, fd, r.seg.segsz);
++  int saved = errno;
++  __close_nocancel (fd);
++  __set_errno (saved);
++  return m;
++}
++
++/* Owner-only permission model: the app sandbox has a single uid.  */
++static bool
++permitted (const struct fxsem_hdr *h, int want)
++{
++  uint32_t mode = __atomic_load_n (&h->mode, __ATOMIC_RELAXED);
++  return (mode & want) == (uint32_t) want;
++}
++
++/* ---- semget ---------------------------------------------------------------- */
++
++int
++__fxsem_get (key_t key, int nsems, int semflg)
++{
++  __libc_once (once, init_once);
++  if (nsems < 0 || nsems > FXSEM_SEMMSL)
++    {
++      __set_errno (EINVAL);
++      return -1;
++    }
++  struct fxshm_req q = { .op = FXSHM_OP_SEM_GET, .key = key,
++                         .size = (uint64_t) nsems, .flags = semflg };
++  struct fxshm_resp r;
++  int fd;
++  if (__fxshm_call (&q, &r, &fd) < 0)
++    return -1;
++  int id = r.result;
++  if (fd >= 0)
++    {
++      /* Map it now; the first semop is then free of daemon round trips.
++         Failure is not fatal here, acquire() retries.  */
++      int saved = errno;
++      struct semmap *m = cache_insert_fd (id, fd, r.seg.segsz);
++      if (m != NULL)
++        cache_put (m);
++      __close_nocancel (fd);
++      __set_errno (saved);
++    }
++  return id;
++}
++
++/* ---- semop / semtimedop ------------------------------------------------------ */
++
++/* Undo slot of PID in H, allocating one if needed; -1 if none is free.  */
++static int
++undo_slot (struct fxsem_hdr *h, int32_t pid)
++{
++  int free_slot = -1;
++  for (int i = 0; i < FXSEM_UNDO_SLOTS; i++)
++    {
++      if (h->undo_pid[i] == pid)
++        return i;
++      if (h->undo_pid[i] == 0 && free_slot < 0)
++        free_slot = i;
++    }
++  if (free_slot < 0)
++    {
++      /* Recycle a slot with nothing to undo.  */
++      for (int i = 0; i < FXSEM_UNDO_SLOTS && free_slot < 0; i++)
++        {
++          int32_t *adj = fxsem_adj (h, i);
++          bool zero = true;
++          for (int32_t k = 0; k < h->nsems && zero; k++)
++            zero = adj[k] == 0;
++          if (zero)
++            free_slot = i;
++        }
++      if (free_slot < 0)
++        return -1;
++    }
++  h->undo_pid[free_slot] = pid;
++  memset (fxsem_adj (h, free_slot), 0, sizeof (int32_t) * h->nsems);
++  return free_slot;
++}
++
++/* Tell fxshmd to apply our SEM_UNDO adjustments when we go away.  */
++static void
++register_undo (pid_t pid)
++{
++  unsigned int gen = __atomic_load_n (&__fxshm_conn_gen, __ATOMIC_ACQUIRE);
++  if (__atomic_load_n (&undo_pid, __ATOMIC_RELAXED) == pid
++      && __atomic_load_n (&undo_gen, __ATOMIC_RELAXED) == gen)
++    return;
++  int saved = errno;
++  struct fxshm_req q = { .op = FXSHM_OP_SEM_UNDO };
++  struct fxshm_resp r;
++  if (__fxshm_call (&q, &r, NULL) == 0)
++    {
++      __atomic_store_n (&undo_gen, gen, __ATOMIC_RELAXED);
++      __atomic_store_n (&undo_pid, pid, __ATOMIC_RELAXED);
++    }
++  __set_errno (saved);
++}
++
++#define WOULD_BLOCK (-1)
++
++/* Applies all of SOPS atomically (called under the lock).  Returns 0, an
++   errno value, or WOULD_BLOCK with *BLOCKED = index of the operation that
++   cannot proceed; on anything but 0 the set is left unchanged.  */
++static int
++try_ops (struct fxsem_hdr *h, const struct sembuf *sops, size_t nsops,
++         int32_t pid, size_t *blocked)
++{
++  struct fxsem_sem *s = fxsem_sems (h);
++  int32_t *adj = NULL;
++  int err = 0;
++  size_t i;
++  for (i = 0; i < nsops; i++)
++    {
++      const struct sembuf *op = &sops[i];
++      struct fxsem_sem *c = &s[op->sem_num];
++      if (op->sem_op == 0)
++        {
++          if (c->val != 0)
++            {
++              *blocked = i;
++              err = WOULD_BLOCK;
++              break;
++            }
++          continue;
++        }
++      int32_t nv = c->val + op->sem_op;
++      if (nv < 0)
++        {
++          *blocked = i;
++          err = WOULD_BLOCK;
++          break;
++        }
++      if (nv > FXSEM_SEMVMX)
++        {
++          err = ERANGE;
++          break;
++        }
++      if (op->sem_flg & SEM_UNDO)
++        {
++          if (adj == NULL)
++            {
++              int slot = undo_slot (h, pid);
++              if (slot < 0)
++                {
++                  err = ENOSPC;
++                  break;
++                }
++              adj = fxsem_adj (h, slot);
++            }
++          int32_t a = adj[op->sem_num] - op->sem_op;
++          if (a < -FXSEM_SEMAEM - 1 || a > FXSEM_SEMAEM)
++            {
++              err = ERANGE;
++              break;
++            }
++          adj[op->sem_num] = a;
++        }
++      c->val = nv;
++    }
++  if (err != 0)
++    {
++      /* Roll back operations 0 .. i-1.  */
++      while (i-- > 0)
++        {
++          const struct sembuf *op = &sops[i];
++          s[op->sem_num].val -= op->sem_op;
++          if ((op->sem_flg & SEM_UNDO) && op->sem_op != 0)
++            adj[op->sem_num] += op->sem_op;
++        }
++      return err;
++    }
++  for (i = 0; i < nsops; i++)
++    s[sops[i].sem_num].pid = pid;
++  h->otime = now_realtime ();
++  return 0;
++}
++
++int
++__fxsem_timedop (int semid, struct sembuf *sops, size_t nsops,
++                 const struct timespec *timeout)
++{
++  if (nsops < 1 || semid < 0)
++    {
++      __set_errno (EINVAL);
++      return -1;
++    }
++  if (nsops > FXSEM_SEMOPM)
++    {
++      __set_errno (E2BIG);
++      return -1;
++    }
++  if (sops == NULL)
++    {
++      __set_errno (EFAULT);
++      return -1;
++    }
++  struct timespec deadline;
++  if (timeout != NULL)
++    {
++      if (timeout->tv_sec < 0 || timeout->tv_nsec < 0
++          || timeout->tv_nsec >= 1000000000)
++        {
++          __set_errno (EINVAL);
++          return -1;
++        }
++      __clock_gettime (CLOCK_MONOTONIC, &deadline);
++      deadline.tv_nsec += timeout->tv_nsec;
++      if (deadline.tv_nsec >= 1000000000)
++        {
++          deadline.tv_nsec -= 1000000000;
++          deadline.tv_sec++;
++        }
++      if (__builtin_add_overflow (deadline.tv_sec, timeout->tv_sec,
++                                  &deadline.tv_sec))
++        timeout = NULL;      /* effectively infinite */
++    }
++  unsigned int max_num = 0;
++  bool alter = false, undo = false;
++  for (size_t i = 0; i < nsops; i++)
++    {
++      if (sops[i].sem_num > max_num)
++        max_num = sops[i].sem_num;
++      if (sops[i].sem_op != 0)
++        alter = true;
++      if (sops[i].sem_flg & SEM_UNDO)
++        undo = true;
++    }
++
++  struct semmap *m = acquire (semid);
++  if (m == NULL)
++    return -1;
++  struct fxsem_hdr *h = m->h;
++  if (max_num >= (unsigned int) h->nsems)
++    {
++      cache_put (m);
++      __set_errno (EFBIG);
++      return -1;
++    }
++  if (!permitted (h, alter ? 0200 : 0400))
++    {
++      cache_put (m);
++      __set_errno (EACCES);
++      return -1;
++    }
++  int32_t pid = __getpid ();
++  if (undo)
++    register_undo (pid);
++
++  fxsem_lock (h, (uint32_t) pid);
++  bool slept = false, timed_out = false;
++  int err;
++  for (;;)
++    {
++      if (h->removed)
++        {
++          /* Linux: EIDRM for a sleeper, EINVAL for a stale id.  */
++          err = slept ? EIDRM : EINVAL;
++          break;
++        }
++      size_t blk = 0;
++      err = try_ops (h, sops, nsops, pid, &blk);
++      if (err != WOULD_BLOCK)
++        break;
++      if ((sops[blk].sem_flg & IPC_NOWAIT) || timed_out)
++        {
++          err = EAGAIN;
++          break;
++        }
++      struct fxsem_sem *s = &fxsem_sems (h)[sops[blk].sem_num];
++      bool zero = sops[blk].sem_op == 0;
++      if (zero)
++        s->zcnt++;
++      else
++        s->ncnt++;
++      h->waiters++;
++      uint32_t seq = h->seq;
++      fxsem_unlock (h);
++      long r = INTERNAL_SYSCALL_CALL (futex, &h->seq, FUTEX_WAIT_BITSET, seq,
++                                      timeout != NULL ? &deadline : NULL,
++                                      NULL, FUTEX_BITSET_MATCH_ANY);
++      fxsem_lock (h, (uint32_t) pid);
++      if (zero)
++        s->zcnt--;
++      else
++        s->ncnt--;
++      h->waiters--;
++      slept = true;
++      if (r == -EINTR)
++        {
++          err = EINTR;
++          break;
++        }
++      if (r == -ETIMEDOUT)
++        timed_out = true;   /* one last try, then EAGAIN */
++    }
++  bool wake = false;
++  if (err == 0 && alter)
++    wake = fxsem_changed (h);
++  bool removed = h->removed;
++  fxsem_unlock (h);
++  if (wake)
++    fxsem_wake_all (h);
++  if (removed)
++    cache_kill (m);
++  cache_put (m);
++  if (err != 0)
++    {
++      __set_errno (err);
++      return -1;
++    }
++  return 0;
++}
++
++/* ---- semctl ------------------------------------------------------------------ */
++
++static void
++clear_adj (struct fxsem_hdr *h, int semnum)
++{
++  for (int slot = 0; slot < FXSEM_UNDO_SLOTS; slot++)
++    {
++      if (h->undo_pid[slot] == 0)
++        continue;
++      int32_t *adj = fxsem_adj (h, slot);
++      if (semnum >= 0)
++        adj[semnum] = 0;
++      else
++        memset (adj, 0, sizeof (int32_t) * h->nsems);
++    }
++}
++
++int
++__fxsem_ctl (int semid, int semnum, int cmd, unsigned long int arg)
++{
++  __libc_once (once, init_once);
++  cmd &= ~FXSEM_IPC_64;
++  switch (cmd)
++    {
++    case IPC_INFO:
++    case SEM_INFO:
++      {
++        struct seminfo *si = (struct seminfo *) arg;
++        if (si == NULL)
++          {
++            __set_errno (EFAULT);
++            return -1;
++          }
++        memset (si, 0, sizeof *si);
++        si->semmap = FXSEM_SEMMNI;
++        si->semmni = FXSEM_SEMMNI;
++        si->semmns = FXSEM_SEMMNI * FXSEM_SEMMSL;
++        si->semmnu = FXSEM_SEMMNI * FXSEM_SEMMSL;
++        si->semmsl = FXSEM_SEMMSL;
++        si->semopm = FXSEM_SEMOPM;
++        si->semume = FXSEM_SEMOPM;
++        si->semusz = cmd == SEM_INFO ? 0 : 20;
++        si->semvmx = FXSEM_SEMVMX;
++        si->semaem = cmd == SEM_INFO ? 0 : FXSEM_SEMAEM;
++        return 0;   /* highest used index: we do not expose indexes */
++      }
++    case IPC_RMID:
++      {
++        if (semid < 0)
++          {
++            __set_errno (EINVAL);
++            return -1;
++          }
++        struct fxshm_req q = { .op = FXSHM_OP_SEM_RMID, .id = semid };
++        struct fxshm_resp r;
++        if (__fxshm_call (&q, &r, NULL) < 0)
++          return -1;
++        struct semmap *m = cache_get (semid);
++        if (m != NULL)
++          {
++            cache_kill (m);
++            cache_put (m);
++          }
++        return 0;
++      }
++    case IPC_STAT:
++    case IPC_SET:
++    case GETVAL:
++    case GETPID:
++    case GETNCNT:
++    case GETZCNT:
++    case GETALL:
++    case SETVAL:
++    case SETALL:
++      break;
++    default:
++      /* SEM_STAT, SEM_STAT_ANY (index based listing): not supported.  */
++      __set_errno (EINVAL);
++      return -1;
++    }
++
++  if ((cmd == IPC_STAT || cmd == IPC_SET || cmd == GETALL || cmd == SETALL)
++      && arg == 0)
++    {
++      __set_errno (EFAULT);
++      return -1;
++    }
++  struct semmap *m = acquire (semid);
++  if (m == NULL)
++    return -1;
++  struct fxsem_hdr *h = m->h;
++  int32_t nsems = h->nsems;
++  bool needs_num = cmd == GETVAL || cmd == GETPID || cmd == GETNCNT
++                   || cmd == GETZCNT || cmd == SETVAL;
++  int err = 0;
++  long int ret = 0;
++  if (needs_num && (semnum < 0 || semnum >= nsems))
++    err = EINVAL;
++  else if (!permitted (h, (cmd == SETVAL || cmd == SETALL) ? 0200
++                          : (cmd == IPC_SET) ? 0 : 0400))
++    err = EACCES;
++  else if (cmd == SETVAL && ((int) arg < 0 || (int) arg > FXSEM_SEMVMX))
++    err = ERANGE;
++  else if (cmd == SETALL)
++    {
++      const unsigned short int *v = (const unsigned short int *) arg;
++      for (int32_t i = 0; i < nsems; i++)
++        if (v[i] > FXSEM_SEMVMX)
++          err = ERANGE;
++    }
++  if (err != 0)
++    {
++      cache_put (m);
++      __set_errno (err);
++      return -1;
++    }
++
++  int32_t pid = __getpid ();
++  struct fxsem_sem *s = fxsem_sems (h);
++  bool wake = false;
++  fxsem_lock (h, (uint32_t) pid);
++  if (h->removed)
++    err = EINVAL;
++  else
++    switch (cmd)
++      {
++      case IPC_STAT:
++        {
++          struct semid_ds *buf = (struct semid_ds *) arg;
++          memset (buf, 0, sizeof *buf);
++          buf->sem_perm.__key = h->key;
++          buf->sem_perm.uid = h->uid;
++          buf->sem_perm.gid = h->gid;
++          buf->sem_perm.cuid = h->cuid;
++          buf->sem_perm.cgid = h->cgid;
++          buf->sem_perm.mode = h->mode;
++          buf->sem_otime = h->otime;
++          buf->sem_ctime = h->ctime;
++          buf->sem_nsems = h->nsems;
++          break;
++        }
++      case IPC_SET:
++        {
++          const struct semid_ds *buf = (const struct semid_ds *) arg;
++          h->uid = buf->sem_perm.uid;
++          h->gid = buf->sem_perm.gid;
++          __atomic_store_n (&h->mode, buf->sem_perm.mode & 0777,
++                            __ATOMIC_RELAXED);
++          h->ctime = now_realtime ();
++          break;
++        }
++      case GETVAL:
++        ret = s[semnum].val;
++        break;
++      case GETPID:
++        ret = s[semnum].pid;
++        break;
++      case GETNCNT:
++        ret = s[semnum].ncnt;
++        break;
++      case GETZCNT:
++        ret = s[semnum].zcnt;
++        break;
++      case GETALL:
++        {
++          unsigned short int *v = (unsigned short int *) arg;
++          for (int32_t i = 0; i < nsems; i++)
++            v[i] = (unsigned short int) s[i].val;
++          break;
++        }
++      case SETVAL:
++        s[semnum].val = (int) arg;
++        s[semnum].pid = pid;
++        clear_adj (h, semnum);
++        h->ctime = now_realtime ();
++        wake = fxsem_changed (h);
++        break;
++      case SETALL:
++        {
++          const unsigned short int *v = (const unsigned short int *) arg;
++          for (int32_t i = 0; i < nsems; i++)
++            {
++              s[i].val = v[i];
++              s[i].pid = pid;
++            }
++          clear_adj (h, -1);
++          h->ctime = now_realtime ();
++          wake = fxsem_changed (h);
++          break;
++        }
++      }
++  bool removed = h->removed;
++  fxsem_unlock (h);
++  if (wake)
++    fxsem_wake_all (h);
++  if (removed)
++    cache_kill (m);
++  cache_put (m);
++  if (err != 0)
++    {
++      __set_errno (err);
++      return -1;
++    }
++  return (int) ret;
++}

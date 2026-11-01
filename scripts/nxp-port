@@ -1,0 +1,144 @@
+#!/bin/sh
+# Native sessions are not chrooted (guest / is Android's), so /usr/bin/env does not
+# exist; python3.13 comes from the Runtime on PATH instead. This line is a no-op
+# string expression for Python and an exec for every POSIX shell.
+"exec" "python3.13" "$0" "$@"
+"""nxp-port — Nixport 宿主服务总线的客机命令行客户端。
+
+协议与退出码见 my-docs/移植规范/宿主服务总线.md；socket 名取自环境变量
+NXP_HOST_SOCKET（abstract namespace，连接时名字前加 \\0）。
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+
+API = 1
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+EXIT_NO_BUS = 3
+EXIT_UNREACHABLE = 4
+EXIT_BUS_CLOSED = 5
+EXIT_UNSUPPORTED_API = 6
+EXIT_UNSUPPORTED_ACTION = 7
+EXIT_BAD_REQUEST = 8
+EXIT_CANCELLED = 9
+
+ERROR_CODES = {
+    "bad-request": EXIT_BAD_REQUEST,
+    "unsupported-api": EXIT_UNSUPPORTED_API,
+    "unsupported-action": EXIT_UNSUPPORTED_ACTION,
+}
+
+
+def call(action, params):
+    """One connection, one request. Returns (exit_code, response dict or None)."""
+    name = os.environ.get("NXP_HOST_SOCKET")
+    if not name:
+        print("nxp-port: NXP_HOST_SOCKET is not set (no running session?)", file=sys.stderr)
+        return EXIT_NO_BUS, None
+    request = {"api": API, "action": action}
+    request.update(params)
+    wire = json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n"
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect("\0" + name)
+    except OSError as e:
+        print(f"nxp-port: cannot connect to the host bus: {e}", file=sys.stderr)
+        return EXIT_UNREACHABLE, None
+    try:
+        sock.sendall(wire)
+        with sock.makefile("r", encoding="utf-8") as reader:
+            line = reader.readline()
+    except OSError as e:
+        print(f"nxp-port: bus I/O error: {e}", file=sys.stderr)
+        return EXIT_BUS_CLOSED, None
+    finally:
+        sock.close()
+    if not line:
+        print("nxp-port: the host bus closed the connection (session stopped?)", file=sys.stderr)
+        return EXIT_BUS_CLOSED, None
+    try:
+        return EXIT_OK, json.loads(line)
+    except ValueError:
+        print(f"nxp-port: bad response from the host: {line.strip()!r}", file=sys.stderr)
+        return EXIT_BUS_CLOSED, None
+
+
+def run(action, params):
+    """Returns (exit_code, response dict or None)."""
+    code, response = call(action, params)
+    if code != EXIT_OK:
+        return code, None
+    if response.get("ok"):
+        return EXIT_OK, response
+    error = response.get("error")
+    if error in ERROR_CODES:
+        print(f"nxp-port: host rejected the request: {error}", file=sys.stderr)
+        return ERROR_CODES[error], None
+    if response.get("cancelled"):
+        return EXIT_CANCELLED, None
+    print(f"nxp-port: request failed: {json.dumps(response, ensure_ascii=False)}", file=sys.stderr)
+    return EXIT_FAILED, None
+
+
+def nonempty(value):
+    if not value:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="nxp-port", description="call the Nixport host service bus")
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    p_toast = sub.add_parser("toast", help="show a Toast on the phone (does not block)")
+    p_toast.add_argument("text", type=nonempty)
+    p_toast.add_argument("--long", action="store_true", help="keep the Toast on screen longer")
+
+    p_dialog = sub.add_parser("dialog", help="show a blocking message box; prints the chosen button")
+    p_dialog.add_argument("--title", default="")
+    p_dialog.add_argument("--text", required=True, type=nonempty)
+    p_dialog.add_argument("--button", dest="buttons", action="append", type=nonempty, default=[],
+                          help="button label, up to three times (default: 确定)")
+
+    p_pick_dir = sub.add_parser("pick-dir", help="choose a folder; prints the guest path")
+    p_pick_dir.add_argument("--initial", default="", help="folder to start at (guest path)")
+
+    p_pick_file = sub.add_parser("pick-file", help="choose a file; prints the guest path")
+    p_pick_file.add_argument("--initial", default="", help="folder to start at (guest path)")
+    p_pick_file.add_argument("--ext", dest="extensions", action="append", default=[],
+                             help="acceptable file extension, repeatable (no dot)")
+
+    args = parser.parse_args()
+    if args.action == "toast":
+        code, _ = run("toast", {"text": args.text, "long": args.long})
+        sys.exit(code)
+
+    if args.action in ("pick-dir", "pick-file"):
+        params = {}
+        if args.initial:
+            params["initial"] = args.initial
+        if args.action == "pick-file":
+            exts = [e.strip().lstrip(".").lower() for e in args.extensions if e.strip()]
+            if exts:
+                params["extensions"] = exts
+        code, response = run(args.action, params)
+        if code == EXIT_OK and response is not None:
+            print(response.get("path", ""))
+        sys.exit(code)
+
+    if len(args.buttons) > 3:
+        parser.error("at most three --button values")
+    code, response = run("dialog", {"title": args.title, "text": args.text,
+                                    "buttons": args.buttons or ["确定"]})
+    if code == EXIT_OK and response is not None:
+        print(response.get("button", ""))
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,586 @@
+fexdroid (local, never upstreamed): Android gamepads as evdev devices for guests.
+
+The app serves each gamepad on a SOCK_SEQPACKET socket in <global data dir>/fexdroid-input/;
+guests see that directory as /dev/input. Opening event<N> connects and announces the
+guest's struct input_event layout; FEX answers EVIOC* ioctls with a fixed Xbox 360 pad
+and reports the node as a character device (13, 64+N). See AndroidInputPad.h and
+NOTES.md N-054. Applies on top of 0001-0005.
+---
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/AndroidInputPad.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/AndroidInputPad.h
+new file mode 100644
+index 0000000..8cee1ae
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/AndroidInputPad.h
+@@ -0,0 +1,282 @@
++// SPDX-License-Identifier: MIT
++// fexdroid (local, never upstreamed): gamepads of the Android app as evdev devices.
++//
++// Apps cannot open /dev/input or /dev/uinput on Android, so the app (cpp/pad_bridge.c)
++// serves each gamepad it sees on a SOCK_SEQPACKET socket named
++//   <global data dir>/fexdroid-input/event<N>
++// and guests see that directory as /dev/input. Opening /dev/input/event<N> connects to the
++// socket and says which struct input_event layout the guest uses (24 bytes for x86-64,
++// 16 for i386); every packet the app sends is then a run of input_events in that layout,
++// so read(), poll() and epoll need nothing from FEX. FEX answers the EVIOC* ioctls with a
++// fixed Xbox 360 pad (the layout of the kernel's xpad driver, which SDL and Steam map
++// without any configuration) and makes stat()/fstat() report a character device: SDL tells
++// devices apart by st_rdev. No force feedback is offered.
++#pragma once
++
++#include <FEXCore/Config/Config.h>
++#include <FEXCore/fextl/string.h>
++
++#include <algorithm>
++#include <cerrno>
++#include <cstdio>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <fcntl.h>
++#include <linux/input.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++namespace FEXDroid {
++
++constexpr char InputDirGuest[] = "/dev/input";
++constexpr char PadDirName[] = "fexdroid-input";
++constexpr uint32_t PadHelloMagic = 0x31505846; // "FXP1"
++constexpr unsigned PadEvdevMinorBase = 64;      // evdev minors start at 64 (char major 13)
++
++struct PadHello {
++  uint32_t Magic;
++  uint32_t EventSize;
++};
++
++inline const fextl::string& PadDir() {
++  static const fextl::string Dir = FEXCore::Config::GetDataDirectory(true) + PadDirName;
++  return Dir;
++}
++
++// "/dev/input" or "/dev/input/..." -> the app's directory, while the app provides one.
++inline bool MapInputPath(const char* Pathname, fextl::string& Out) {
++  constexpr size_t Len = sizeof(InputDirGuest) - 1;
++  if (!Pathname || strncmp(Pathname, InputDirGuest, Len) != 0 || (Pathname[Len] != '\0' && Pathname[Len] != '/')) {
++    return false;
++  }
++  if (::access(PadDir().c_str(), F_OK) != 0) {
++    return false;
++  }
++  Out = PadDir() + (Pathname + Len);
++  return true;
++}
++
++// N of ".../fexdroid-input/event<N>", or -1.
++inline int PadNumberOfPath(const char* Path, size_t PathLen) {
++  constexpr char Tail[] = "/fexdroid-input/event";
++  constexpr size_t TailLen = sizeof(Tail) - 1;
++  const char* Hit = nullptr;
++  for (const char* P = Path; P + TailLen <= Path + PathLen; ++P) {
++    if (memcmp(P, Tail, TailLen) == 0) {
++      Hit = P;
++    }
++  }
++  if (!Hit) {
++    return -1;
++  }
++  const char* Digits = Hit + TailLen;
++  if (Digits >= Path + PathLen || *Digits < '0' || *Digits > '9') {
++    return -1;
++  }
++  int N = 0;
++  for (const char* D = Digits; D < Path + PathLen && *D; ++D) {
++    if (*D < '0' || *D > '9' || N > 100000) {
++      return -1;
++    }
++    N = N * 10 + (*D - '0');
++  }
++  return N;
++}
++
++// N when `fd` is a connection to one of the app's pad sockets, or -1.
++inline int PadNumberOfFd(int fd) {
++  const int SavedErrno = errno;
++  sockaddr_un Addr {};
++  socklen_t Len = sizeof(Addr);
++  int N = -1;
++  if (::getpeername(fd, reinterpret_cast<sockaddr*>(&Addr), &Len) == 0 && Addr.sun_family == AF_UNIX &&
++      Len > offsetof(sockaddr_un, sun_path) + 1 && Addr.sun_path[0] == '/') {
++    N = PadNumberOfPath(Addr.sun_path, strnlen(Addr.sun_path, Len - offsetof(sockaddr_un, sun_path)));
++  }
++  errno = SavedErrno;
++  return N;
++}
++
++// Guest path of a pad node ("/dev/input/event<N>" after MapInputPath), or -1.
++inline int PadNumberOfMappedPath(const char* MappedPath) {
++  if (!MappedPath || strncmp(MappedPath, PadDir().c_str(), PadDir().size()) != 0) {
++    return -1;
++  }
++  return PadNumberOfPath(MappedPath, strlen(MappedPath));
++}
++
++// Opens pad node `MappedPath` (a socket of the app): connect, then say the event layout.
++inline int OpenPad(const char* MappedPath, int Flags, bool Is64Bit) {
++  sockaddr_un Addr {};
++  Addr.sun_family = AF_UNIX;
++  if (strlen(MappedPath) >= sizeof(Addr.sun_path)) {
++    errno = ENAMETOOLONG;
++    return -1;
++  }
++  strcpy(Addr.sun_path, MappedPath);
++  const int fd = ::socket(AF_UNIX, SOCK_SEQPACKET | ((Flags & O_CLOEXEC) ? SOCK_CLOEXEC : 0), 0);
++  if (fd < 0) {
++    return -1;
++  }
++  if (::connect(fd, reinterpret_cast<sockaddr*>(&Addr), sizeof(Addr)) != 0) {
++    const int E = errno;
++    ::close(fd);
++    errno = (E == ENOENT) ? ENOENT : ENODEV; // The pad went away (or the app is not listening).
++    return -1;
++  }
++  const PadHello Hello {PadHelloMagic, Is64Bit ? 24u : 16u};
++  if (::send(fd, &Hello, sizeof(Hello), MSG_NOSIGNAL) != sizeof(Hello)) {
++    ::close(fd);
++    errno = ENODEV;
++    return -1;
++  }
++  if (Flags & O_NONBLOCK) {
++    ::fcntl(fd, F_SETFL, O_NONBLOCK);
++  }
++  return fd;
++}
++
++// struct stat / stat64 of a pad: a character device, as /dev/input/event<N> is elsewhere.
++template<typename T>
++inline void PadFixStat(int N, T* St) {
++  St->st_mode = S_IFCHR | 0660;
++  St->st_rdev = makedev(13, PadEvdevMinorBase + N);
++  St->st_size = 0;
++}
++
++inline void PadFixStatx(int N, struct statx* St) {
++  St->stx_mode = S_IFCHR | 0660;
++  St->stx_rdev_major = 13;
++  St->stx_rdev_minor = PadEvdevMinorBase + N;
++  St->stx_size = 0;
++}
++
++// fstat()-style fix: `fd` may be a pad connection.
++template<typename T>
++inline void PadFixFdStat(int fd, T* St) {
++  if (S_ISSOCK(St->st_mode)) {
++    const int N = PadNumberOfFd(fd);
++    if (N >= 0) {
++      PadFixStat(N, St);
++    }
++  }
++}
++
++inline void PadFixFdStatx(int fd, struct statx* St) {
++  if (S_ISSOCK(St->stx_mode)) {
++    const int N = PadNumberOfFd(fd);
++    if (N >= 0) {
++      PadFixStatx(N, St);
++    }
++  }
++}
++
++// The fixed device: an Xbox 360 pad as the kernel's xpad driver describes one.
++namespace PadDevice {
++  constexpr uint16_t Keys[] = {BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR};
++  struct Abs {
++    uint16_t Code;
++    int32_t Min, Max, Fuzz, Flat;
++  };
++  constexpr Abs Axes[] = {
++    {ABS_X, -32768, 32767, 16, 128},  {ABS_Y, -32768, 32767, 16, 128}, {ABS_Z, 0, 255, 0, 0},     {ABS_RX, -32768, 32767, 16, 128},
++    {ABS_RY, -32768, 32767, 16, 128}, {ABS_RZ, 0, 255, 0, 0},          {ABS_HAT0X, -1, 1, 0, 0}, {ABS_HAT0Y, -1, 1, 0, 0},
++  };
++} // namespace PadDevice
++
++inline void SetBit(uint8_t* Buf, size_t Len, unsigned Bit) {
++  if (Bit / 8 < Len) {
++    Buf[Bit / 8] |= uint8_t(1u << (Bit % 8));
++  }
++}
++
++inline int64_t CopyString(uint64_t Arg, size_t Len, const char* S) {
++  if (Len == 0) {
++    return 0;
++  }
++  const size_t N = std::min(Len, strlen(S) + 1);
++  memcpy(reinterpret_cast<void*>(Arg), S, N);
++  reinterpret_cast<char*>(Arg)[N - 1] = '\0';
++  return static_cast<int64_t>(N);
++}
++
++// EVIOC* on a pad connection. Returns false when `fd` is not one (the caller goes on as
++// before); otherwise Result is the syscall result (negative errno on failure).
++inline bool PadIoctl(int fd, uint32_t Cmd, uint64_t Arg, uint64_t& Result) {
++  if (_IOC_TYPE(Cmd) != 'E') {
++    return false;
++  }
++  const int N = PadNumberOfFd(fd);
++  if (N < 0) {
++    return false;
++  }
++  const unsigned Nr = _IOC_NR(Cmd);
++  const size_t Size = _IOC_SIZE(Cmd);
++  const bool Read = _IOC_DIR(Cmd) & _IOC_READ;
++  int64_t R = -EINVAL;
++
++  if (Read && Nr == _IOC_NR(EVIOCGVERSION) && Size == sizeof(int)) {
++    *reinterpret_cast<int*>(Arg) = EV_VERSION;
++    R = 0;
++  } else if (Read && Nr == _IOC_NR(EVIOCGID) && Size == sizeof(input_id)) {
++    *reinterpret_cast<input_id*>(Arg) = input_id {BUS_USB, 0x045e, 0x028e, 0x0114};
++    R = 0;
++  } else if (Read && Nr == 0x06) { // EVIOCGNAME(len)
++    R = CopyString(Arg, Size, "Microsoft X-Box 360 pad");
++  } else if (Read && Nr == 0x07) { // EVIOCGPHYS(len)
++    char Phys[32];
++    snprintf(Phys, sizeof(Phys), "fexdroid-pad%d/input0", N);
++    R = CopyString(Arg, Size, Phys);
++  } else if (Read && Nr == 0x08) { // EVIOCGUNIQ(len): none, as for most pads
++    R = -ENOENT;
++  } else if (Read && (Nr == 0x09 || (Nr >= 0x18 && Nr <= 0x1b))) { // PROP, KEY, LED, SND, SW: nothing set
++    memset(reinterpret_cast<void*>(Arg), 0, Size);
++    R = static_cast<int64_t>(Size);
++  } else if (Read && Nr >= 0x20 && Nr < 0x20 + EV_CNT) { // EVIOCGBIT(ev, len)
++    auto* Buf = reinterpret_cast<uint8_t*>(Arg);
++    memset(Buf, 0, Size);
++    switch (Nr - 0x20) {
++    case 0:
++      SetBit(Buf, Size, EV_SYN);
++      SetBit(Buf, Size, EV_KEY);
++      SetBit(Buf, Size, EV_ABS);
++      break;
++    case EV_KEY:
++      for (auto K : PadDevice::Keys) {
++        SetBit(Buf, Size, K);
++      }
++      break;
++    case EV_ABS:
++      for (const auto& A : PadDevice::Axes) {
++        SetBit(Buf, Size, A.Code);
++      }
++      break;
++    default: break;
++    }
++    R = static_cast<int64_t>(Size);
++  } else if (Read && Nr >= 0x40 && Nr < 0x40 + ABS_CNT && Size == sizeof(input_absinfo)) { // EVIOCGABS(abs)
++    R = -EINVAL;
++    for (const auto& A : PadDevice::Axes) {
++      if (A.Code == Nr - 0x40) {
++        *reinterpret_cast<input_absinfo*>(Arg) = input_absinfo {0, A.Min, A.Max, A.Fuzz, A.Flat, 0};
++        R = 0;
++      }
++    }
++  } else if (!Read && Nr >= 0xc0 && Nr < 0xc0 + ABS_CNT) { // EVIOCSABS: accepted, nothing changes
++    R = 0;
++  } else if (Nr == _IOC_NR(EVIOCGEFFECTS) && Read && Size == sizeof(int)) {
++    *reinterpret_cast<int*>(Arg) = 0;
++    R = 0;
++  } else if (Nr == _IOC_NR(EVIOCGRAB) || Nr == _IOC_NR(EVIOCREVOKE) || Nr == _IOC_NR(EVIOCSCLOCKID)) {
++    R = 0;
++  }
++  // Everything else (EVIOCSFF, keymaps, MT slots, masks): EINVAL, like a pad without them.
++  Result = static_cast<uint64_t>(R);
++  return true;
++}
++
++} // namespace FEXDroid
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
+index 49bc6cf..06460c8 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
+@@ -31,6 +31,7 @@ $end_info$
+ #include <cstring>
+ #include <linux/openat2.h>
+ #include "LinuxSyscalls/AndroidOpenat2.h" // fexdroid
++#include "LinuxSyscalls/AndroidInputPad.h" // fexdroid
+ #include <fcntl.h>
+ #include <filesystem>
+ #include <optional>
+@@ -622,6 +623,12 @@ std::optional<std::string_view> FileManager::GetSelf(const char* Pathname) const
+     return Fake;
+   }
+ 
++  // fexdroid: /dev/input is the app's gamepad directory while it has one (AndroidInputPad.h).
++  thread_local fextl::string Input;
++  if (FEXDroid::MapInputPath(Pathname, Input)) {
++    return Input;
++  }
++
+   return Pathname;
+ }
+ 
+@@ -790,6 +797,9 @@ uint64_t FileManager::Open(const char* pathname, int flags, uint32_t mode) {
+   }
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (FEXDroid::PadNumberOfMappedPath(SelfPath) >= 0) { // fexdroid: a gamepad of the app
++    return FEXDroid::OpenPad(SelfPath, flags, FEX::HLE::_SyscallHandler->Is64BitMode());
++  }
+   int fd = -1;
+ 
+   if (!ShouldSkipOpenInEmu(flags)) {
+@@ -863,6 +873,13 @@ uint64_t FileManager::Stat(const char* pathname, void* buf) {
+   }
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (const int PadN = FEXDroid::PadNumberOfMappedPath(SelfPath); PadN >= 0) { // fexdroid: a gamepad of the app
++    uint64_t Result = ::stat(SelfPath, reinterpret_cast<struct stat*>(buf));
++    if (Result != -1) {
++      FEXDroid::PadFixStat(PadN, reinterpret_cast<struct stat*>(buf));
++    }
++    return Result;
++  }
+ 
+   // Stat follows symlinks
+   FDPathTmpData TmpFilename;
+@@ -883,6 +900,13 @@ uint64_t FileManager::Lstat(const char* pathname, void* buf) {
+   }
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (const int PadN = FEXDroid::PadNumberOfMappedPath(SelfPath); PadN >= 0) { // fexdroid: a gamepad of the app
++    uint64_t Result = ::lstat(SelfPath, reinterpret_cast<struct stat*>(buf));
++    if (Result != -1) {
++      FEXDroid::PadFixStat(PadN, reinterpret_cast<struct stat*>(buf));
++    }
++    return Result;
++  }
+ 
+   // lstat does not follow symlinks
+   FDPathTmpData TmpFilename;
+@@ -1075,6 +1099,9 @@ uint64_t FileManager::Openat([[maybe_unused]] int dirfs, const char* pathname, i
+   }
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (FEXDroid::PadNumberOfMappedPath(SelfPath) >= 0) { // fexdroid: a gamepad of the app
++    return FEXDroid::OpenPad(SelfPath, flags, FEX::HLE::_SyscallHandler->Is64BitMode());
++  }
+ 
+   int32_t fd = -1;
+ 
+@@ -1123,6 +1150,9 @@ uint64_t FileManager::Openat2(int dirfs, const char* pathname, FEX::HLE::open_ho
+   }
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (FEXDroid::PadNumberOfMappedPath(SelfPath) >= 0) { // fexdroid: a gamepad of the app
++    return FEXDroid::OpenPad(SelfPath, static_cast<int>(how->flags), FEX::HLE::_SyscallHandler->Is64BitMode());
++  }
+ 
+   int32_t fd = -1;
+ 
+@@ -1157,6 +1187,13 @@ uint64_t FileManager::Openat2(int dirfs, const char* pathname, FEX::HLE::open_ho
+ }
+ 
+ uint64_t FileManager::Statx(int dirfd, const char* pathname, int flags, uint32_t mask, struct statx* statxbuf) {
++  if ((flags & AT_EMPTY_PATH) && pathname && pathname[0] == '\0') { // fexdroid: fstat of a gamepad
++    uint64_t Result = FHU::Syscalls::statx(dirfd, pathname, flags, mask, statxbuf);
++    if (Result != -1) {
++      FEXDroid::PadFixFdStatx(dirfd, statxbuf);
++    }
++    return Result;
++  }
+   if (FEXDroidIsHiddenHostPath(pathname)) { // fexdroid
+     errno = ENOENT;
+     return -1;
+@@ -1169,6 +1206,13 @@ uint64_t FileManager::Statx(int dirfd, const char* pathname, int flags, uint32_t
+ 
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (const int PadN = FEXDroid::PadNumberOfMappedPath(SelfPath); PadN >= 0) { // fexdroid: a gamepad of the app
++    uint64_t Result = FHU::Syscalls::statx(AT_FDCWD, SelfPath, flags, mask, statxbuf);
++    if (Result != -1) {
++      FEXDroid::PadFixStatx(PadN, statxbuf);
++    }
++    return Result;
++  }
+ 
+   FDPathTmpData TmpFilename;
+   auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flags & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
+@@ -1208,6 +1252,13 @@ uint64_t FileManager::Statfs(const char* path, void* buf) {
+ }
+ 
+ uint64_t FileManager::NewFSStatAt(int dirfd, const char* pathname, struct stat* buf, int flag) {
++  if ((flag & AT_EMPTY_PATH) && pathname && pathname[0] == '\0') { // fexdroid: fstat of a gamepad
++    uint64_t Result = ::fstatat(dirfd, pathname, buf, flag);
++    if (Result != -1) {
++      FEXDroid::PadFixFdStat(dirfd, buf);
++    }
++    return Result;
++  }
+   if (FEXDroidIsHiddenHostPath(pathname)) { // fexdroid
+     errno = ENOENT;
+     return -1;
+@@ -1219,6 +1270,13 @@ uint64_t FileManager::NewFSStatAt(int dirfd, const char* pathname, struct stat*
+ 
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (const int PadN = FEXDroid::PadNumberOfMappedPath(SelfPath); PadN >= 0) { // fexdroid: a gamepad of the app
++    uint64_t Result = ::fstatat(AT_FDCWD, SelfPath, buf, flag);
++    if (Result != -1) {
++      FEXDroid::PadFixStat(PadN, buf);
++    }
++    return Result;
++  }
+ 
+   FDPathTmpData TmpFilename;
+   auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flag & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
+@@ -1232,6 +1290,13 @@ uint64_t FileManager::NewFSStatAt(int dirfd, const char* pathname, struct stat*
+ }
+ 
+ uint64_t FileManager::NewFSStatAt64(int dirfd, const char* pathname, struct stat64* buf, int flag) {
++  if ((flag & AT_EMPTY_PATH) && pathname && pathname[0] == '\0') { // fexdroid: fstat of a gamepad
++    uint64_t Result = ::fstatat64(dirfd, pathname, buf, flag);
++    if (Result != -1) {
++      FEXDroid::PadFixFdStat(dirfd, buf);
++    }
++    return Result;
++  }
+   if (FEXDroidIsHiddenHostPath(pathname)) { // fexdroid
+     errno = ENOENT;
+     return -1;
+@@ -1243,6 +1308,13 @@ uint64_t FileManager::NewFSStatAt64(int dirfd, const char* pathname, struct stat
+ 
+   auto NewPath = GetSelf(pathname);
+   const char* SelfPath = NewPath ? NewPath->data() : nullptr;
++  if (const int PadN = FEXDroid::PadNumberOfMappedPath(SelfPath); PadN >= 0) { // fexdroid: a gamepad of the app
++    uint64_t Result = ::fstatat64(AT_FDCWD, SelfPath, buf, flag);
++    if (Result != -1) {
++      FEXDroid::PadFixStat(PadN, buf);
++    }
++    return Result;
++  }
+ 
+   FDPathTmpData TmpFilename;
+   auto Path = GetEmulatedFDPath(dirfd, SelfPath, (flag & AT_SYMLINK_NOFOLLOW) == 0, TmpFilename);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
+index 1c6ce1e..e6c121c 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
+@@ -7,6 +7,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/AndroidInputPad.h" // fexdroid
+ #include "LinuxSyscalls/x64/Syscalls.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/AndroidSeccomp.h"
+@@ -400,7 +401,15 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+   REGISTER_SYSCALL_IMPL(keyctl, SyscallPassthrough5<SYSCALL_DEF(keyctl)>);
+   REGISTER_SYSCALL_IMPL(ioprio_set, SyscallPassthrough2<SYSCALL_DEF(ioprio_set)>);
+   REGISTER_SYSCALL_IMPL(ioprio_get, SyscallPassthrough3<SYSCALL_DEF(ioprio_get)>);
+-  REGISTER_SYSCALL_IMPL(inotify_add_watch, SyscallPassthrough3<SYSCALL_DEF(inotify_add_watch)>);
++  // fexdroid: a watch on /dev/input watches the app's gamepad directory (AndroidInputPad.h).
++  REGISTER_SYSCALL_IMPL(inotify_add_watch, [](FEXCore::Core::CpuStateFrame* Frame, int fd, const char* pathname, uint32_t mask) -> uint64_t {
++    fextl::string Input;
++    if (FEXDroid::MapInputPath(pathname, Input)) {
++      pathname = Input.c_str();
++    }
++    uint64_t Result = ::syscall(SYSCALL_DEF(inotify_add_watch), fd, pathname, mask);
++    SYSCALL_ERRNO();
++  });
+   REGISTER_SYSCALL_IMPL(inotify_rm_watch, SyscallPassthrough2<SYSCALL_DEF(inotify_rm_watch)>);
+   REGISTER_SYSCALL_IMPL(migrate_pages, SyscallPassthrough4<SYSCALL_DEF(migrate_pages)>);
+   // fexdroid: new directories under a RootFS-only parent (e.g. /tmp on Android) go into the RootFS.
+@@ -519,7 +528,15 @@ namespace x64 {
+   void RegisterPassthrough(FEX::HLE::SyscallHandler* Handler) {
+     RegisterCommon(Handler);
+     REGISTER_SYSCALL_IMPL_X64(ftruncate, SyscallPassthrough2<SYSCALL_DEF(ftruncate)>);
+-    REGISTER_SYSCALL_IMPL_X64(ioctl, SyscallPassthrough3<SYSCALL_DEF(ioctl)>);
++    // fexdroid: gamepads of the app (AndroidInputPad.h).
++    REGISTER_SYSCALL_IMPL_X64(ioctl, [](FEXCore::Core::CpuStateFrame* Frame, int fd, uint64_t request, uint64_t arg) -> uint64_t {
++      uint64_t Result;
++      if (FEXDroid::PadIoctl(fd, request, arg, Result)) {
++        return Result;
++      }
++      Result = ::syscall(SYSCALL_DEF(ioctl), fd, request, arg);
++      SYSCALL_ERRNO();
++    });
+     REGISTER_SYSCALL_IMPL_X64(pread_64, SyscallPassthrough4<SYSCALL_DEF(pread_64)>);
+     REGISTER_SYSCALL_IMPL_X64(pwrite_64, SyscallPassthrough4<SYSCALL_DEF(pwrite_64)>);
+     REGISTER_SYSCALL_IMPL_X64(readv, SyscallPassthrough3<SYSCALL_DEF(readv)>);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp
+index c5dad94..bcf19c4 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/FD.cpp
+@@ -6,6 +6,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/Syscalls.h"
++#include "LinuxSyscalls/AndroidInputPad.h" // fexdroid
+ #include "LinuxSyscalls/x32/IoctlEmulation.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/SyscallsEnum.h"
+@@ -326,6 +327,7 @@ void RegisterFD(FEX::HLE::SyscallHandler* Handler) {
+     struct stat host_stat;
+     uint64_t Result = ::fstat(fd, &host_stat);
+     if (Result != -1) {
++      FEXDroid::PadFixFdStat(fd, &host_stat); // fexdroid: gamepads (AndroidInputPad.h)
+       if (host_stat.st_ino > std::numeric_limits<decltype(buf->st_ino)>::max()) {
+         return -EOVERFLOW;
+       }
+@@ -370,6 +372,7 @@ void RegisterFD(FEX::HLE::SyscallHandler* Handler) {
+     struct stat host_stat;
+     uint64_t Result = ::fstat(fd, &host_stat);
+     if (Result != -1) {
++      FEXDroid::PadFixFdStat(fd, &host_stat); // fexdroid: gamepads (AndroidInputPad.h)
+       FaultSafeUserMemAccess::VerifyIsWritable(buf, sizeof(*buf));
+       *buf = host_stat;
+     }
+@@ -411,6 +414,7 @@ void RegisterFD(FEX::HLE::SyscallHandler* Handler) {
+     struct stat64 host_stat;
+     uint64_t Result = ::fstat64(fd, &host_stat);
+     if (Result != -1) {
++      FEXDroid::PadFixFdStat(fd, &host_stat); // fexdroid: gamepads (AndroidInputPad.h)
+       FaultSafeUserMemAccess::VerifyIsWritable(buf, sizeof(*buf));
+       *buf = host_stat;
+     }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp
+index f5ccfcf..c993bb7 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x32/IoctlEmulation.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ #include "Ioctl/drm.h"
++#include "LinuxSyscalls/AndroidInputPad.h" // fexdroid
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/x32/Ioctl/asound.h"
+@@ -1000,6 +1001,9 @@ static constexpr std::array<DRMLRUCacheFDCache::HandlerType, 1U << _IOC_TYPEBITS
+ }();
+ 
+ uint32_t ioctl32(FEXCore::Core::CpuStateFrame* Frame, int fd, uint32_t request, uint32_t args) {
++  if (uint64_t Result; FEXDroid::PadIoctl(fd, request, args, Result)) { // fexdroid: gamepads (AndroidInputPad.h)
++    return Result;
++  }
+   return Handlers[_IOC_TYPE(request)](Frame, fd, request, args);
+ }
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/FD.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/FD.cpp
+index 703c875..74410d3 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/FD.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/FD.cpp
+@@ -6,6 +6,7 @@ $end_info$
+ */
+ 
+ #include "LinuxSyscalls/FileManagement.h"
++#include "LinuxSyscalls/AndroidInputPad.h" // fexdroid
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+ #include "LinuxSyscalls/x64/Types.h"
+@@ -78,6 +79,7 @@ void RegisterFD(FEX::HLE::SyscallHandler* Handler) {
+     struct stat host_stat;
+     uint64_t Result = ::fstat(fd, &host_stat);
+     if (Result != -1) {
++      FEXDroid::PadFixFdStat(fd, &host_stat); // fexdroid: gamepads (AndroidInputPad.h)
+       *buf = host_stat;
+     }
+     SYSCALL_ERRNO();

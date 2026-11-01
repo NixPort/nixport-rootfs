@@ -1,0 +1,43 @@
+From: fexdroid
+Subject: [PATCH] tu/kgsl: answer zero-timeout timestamp waits as polls
+
+KGSL treats a timeout of 0 in IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID as "wait
+forever". get_relative_ms() returns 0 once the deadline has passed (and for
+callers that only poll), so every poll blocked until the GPU retired the
+timestamp, keeping CPU and GPU in lock-step. Read the retired timestamp
+instead and compare it with wrap-around.
+FEXDROID_NO_KGSL_POLL=1 restores the old behaviour (for A/B runs).
+
+Idea credit: Bannerlator / DroidDeck (kgslpoll). Written independently for
+fexdroid; no code copied. License: MIT (Mesa).
+---
+diff -ruN a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc	2026-10-11 12:20:26.626556865 +0300
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc	2026-10-11 12:20:26.640556956 +0300
+@@ -840,6 +840,26 @@
+       .timeout = get_relative_ms(abs_timeout_ns),
+    };
+ 
++   /* KGSL reads a timeout of 0 as "no timeout", so a zero-timeout wait (a
++    * poll: "has this retired yet?") would block until the GPU gets there and
++    * keep the CPU in lock-step with the GPU. Answer polls from the retired
++    * timestamp instead.
++    */
++   static int poll_fix = -1;
++   if (poll_fix < 0)
++      poll_fix = !debug_get_bool_option("FEXDROID_NO_KGSL_POLL", false);
++   if (wait.timeout == 0 && poll_fix) {
++      struct kgsl_cmdstream_readtimestamp_ctxtid rd = {
++         .context_id = context_id,
++         .type = KGSL_TIMESTAMP_RETIRED,
++      };
++      if (ioctl(fd, IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID, &rd) == 0)
++         return timestamp_cmp(rd.timestamp, timestamp) ? VK_SUCCESS
++                                                         : VK_TIMEOUT;
++      /* Unknown to the read: fall back to a 1 ms wait, never an endless one. */
++      wait.timeout = 1;
++   }
++
+    while (true) {
+       int ret = ioctl(fd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID, &wait);
+ 

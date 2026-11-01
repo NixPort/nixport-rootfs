@@ -1,0 +1,18 @@
+fexdroid (local, never upstreamed): thunkgen builds with clang/LLVM 23.
+
+clang 23 removed clang::FileManager::clearStatCache(); skip the call there (the stat
+cache it cleared no longer exists). Build-host only: thunkgen runs on the PC.
+---
+diff --git a/ThunkLibs/Generator/gen.cpp b/ThunkLibs/Generator/gen.cpp
+index ccc7cbc..90e9c61 100644
+--- a/ThunkLibs/Generator/gen.cpp
++++ b/ThunkLibs/Generator/gen.cpp
+@@ -840,6 +840,8 @@ bool GenerateThunkLibsActionFactory::runInvocation(std::shared_ptr<clang::Compil
+ 
+   const bool Success = Compiler.ExecuteAction(Action);
+ 
++#if LLVM_VERSION_MAJOR < 23 // fexdroid: clang 23 dropped the FileManager stat cache
+   Files->clearStatCache();
++#endif
+   return Success;
+ }

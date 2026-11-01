@@ -1,0 +1,38 @@
+From c96b2e4c5667176c01d502ccafc82121fc18231e Mon Sep 17 00:00:00 2001
+From: Emma Anholt
+Date: 2026-09-01T11:52:16.000-07:00
+Subject: [PATCH] tu/kgsl: Fix double-close on load failure.
+
+tu/kgsl: Fix double-close on load failure.
+
+The caller closes the fd for us on any failure.
+
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/44152>
+
+Upstream: https://gitlab.freedesktop.org/mesa/mesa/-/commit/c96b2e4c5667176c01d502ccafc82121fc18231e
+License: MIT (Mesa). Backported unchanged to Mesa 26.2.3 for fexdroid.
+---
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 9e0fc93568a0f41c8d9ecc91857bc60796fb5b63..cb06dd8fa38aadf30ffb93b95e638447a1b7f2aa 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -1803,10 +1803,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+    struct tu_physical_device *device = (struct tu_physical_device *)
+       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
+                 VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+-   if (!device) {
+-      close(fd);
++   if (!device)
+       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+-   }
+ 
+    static const char dma_heap_path[] = "/dev/dma_heap/system";
+    static const char ion_path[] = "/dev/ion";
+@@ -1965,7 +1963,6 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+ 
+ fail:
+    vk_free(&instance->vk.alloc, device);
+-   close(fd);
+    if (dma_fd >= 0)
+       close(dma_fd);
+    return result;

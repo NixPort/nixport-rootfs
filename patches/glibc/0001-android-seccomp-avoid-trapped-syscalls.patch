@@ -1,0 +1,73 @@
+--- a/sysdeps/nptl/dl-tls_init_tp.c
++++ b/sysdeps/nptl/dl-tls_init_tp.c
+@@ -91,8 +91,10 @@
+     pd->robust_head.futex_offset = (offsetof (pthread_mutex_t, __data.__lock)
+                                     - offsetof (pthread_mutex_t,
+                                                 __data.__list.__next));
+-    int res = INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+-                                     sizeof (struct robust_list_head));
++    /* fexdroid: Android's app seccomp filter traps set_robust_list with
++       SIGSYS, so it is never called.  Robust mutexes still work in
++       userspace; only the kernel's cleanup on thread death is lost.  */
++    int res = 0;
+     if (!INTERNAL_SYSCALL_ERROR_P (res))
+       {
+ #ifndef __ASSUME_SET_ROBUST_LIST
+@@ -107,7 +109,8 @@
+        allocated rseq area.  An rseq area of at least 32 bytes is always
+        allocated since application code is allowed to check the status of the
+        rseq registration by reading the content of the 'cpu_id' field.  */
+-    bool do_rseq = TUNABLE_GET (rseq, int, NULL);
++    /* fexdroid: rseq is trapped by Android's app seccomp filter.  */
++    bool do_rseq = false;
+     if (!rseq_register_current_thread (pd, do_rseq))
+       _rseq_size = 0;
+   }
+--- a/nptl/pthread_create.c
++++ b/nptl/pthread_create.c
+@@ -384,10 +384,9 @@
+   if (__nptl_set_robust_list_avail)
+ #endif
+     {
+-      /* This call should never fail because the initial call in init.c
+-	 succeeded.  */
+-      INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+-			     sizeof (struct robust_list_head));
++      /* fexdroid: Android's app seccomp filter traps set_robust_list with
++         SIGSYS, so it is never called.  Robust mutexes still work in
++         userspace; only the kernel's cleanup on thread death is lost.  */
+     }
+ 
+   /* This is where the try/finally block should be created.  For
+--- a/sysdeps/nptl/_Fork.c
++++ b/sysdeps/nptl/_Fork.c
+@@ -49,8 +49,9 @@
+       self->robust_prev = &self->robust_head;
+ #endif
+       self->robust_head.list = &self->robust_head;
+-      INTERNAL_SYSCALL_CALL (set_robust_list, &self->robust_head,
+-			     sizeof (struct robust_list_head));
++      /* fexdroid: Android's app seccomp filter traps set_robust_list with
++         SIGSYS, so it is never called.  Robust mutexes still work in
++         userspace; only the kernel's cleanup on thread death is lost.  */
+       call_function_static_weak (__getrandom_fork_subprocess);
+     }
+ 
+--- a/sysdeps/unix/sysv/linux/faccessat.c
++++ b/sysdeps/unix/sysv/linux/faccessat.c
+@@ -26,12 +26,11 @@
+ int
+ __faccessat (int fd, const char *file, int mode, int flag)
+ {
+-  int ret = INLINE_SYSCALL_CALL (faccessat2, fd, file, mode, flag);
+ #if __ASSUME_FACCESSAT2
+-  return ret;
++  return INLINE_SYSCALL_CALL (faccessat2, fd, file, mode, flag);
+ #else
+-  if (ret == 0 || errno != ENOSYS)
+-    return ret;
++  /* fexdroid: faccessat2 is trapped by Android's app seccomp filter
++     (SIGSYS, not ENOSYS), so go straight to the faccessat fallback.  */
+ 
+   if (flag & ~(AT_SYMLINK_NOFOLLOW | AT_EACCESS))
+     return INLINE_SYSCALL_ERROR_RETURN_VALUE (EINVAL);

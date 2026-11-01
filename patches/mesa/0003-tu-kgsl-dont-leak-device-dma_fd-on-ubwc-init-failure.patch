@@ -1,0 +1,27 @@
+From 35f59101b32a7d110e28c8f3e4028f2884c5dec9 Mon Sep 17 00:00:00 2001
+From: Emma Anholt
+Date: 2026-09-01T12:07:43.000-07:00
+Subject: [PATCH] tu/kgsl: Don't leak the device/dma_fd on UBWC init failure.
+
+tu/kgsl: Don't leak the device/dma_fd on UBWC init failure.
+
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/44152>
+
+Upstream: https://gitlab.freedesktop.org/mesa/mesa/-/commit/35f59101b32a7d110e28c8f3e4028f2884c5dec9
+License: MIT (Mesa). Backported unchanged to Mesa 26.2.3 for fexdroid.
+---
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index cb06dd8fa38aadf30ffb93b95e638447a1b7f2aa..776c44667207fe1161ad433ea777162d1ecef1ad 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -1936,8 +1936,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+       device->ubwc_config.macrotile_mode = FDL_MACROTILE_8_CHANNEL;
+       break;
+    default:
+-      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+-                       "unknown UBWC version 0x%x", ubwc_version);
++      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "unknown UBWC version 0x%x", ubwc_version);
++      goto fail;
+    }
+ 
+    /* kgsl unfortunately hardcodes some settings for certain GPUs and doesn't

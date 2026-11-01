@@ -1,0 +1,31 @@
+From: fexdroid
+Subject: [PATCH] JitSymbols: perf map in the directory FEX_PERFMAP_DIR names
+
+FEX writes /tmp/perf-<pid>.map for profilers (Debug options LibraryJITNaming,
+BlockJITNaming). An Android app has no /tmp to write to.
+
+Local patch, not upstream (NOTES.md N-039).
+---
+diff --git a/FEXCore/Source/Common/JitSymbols.cpp b/FEXCore/Source/Common/JitSymbols.cpp
+index 8e93419..0665687 100644
+--- a/FEXCore/Source/Common/JitSymbols.cpp
++++ b/FEXCore/Source/Common/JitSymbols.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "Common/JitSymbols.h"
+ 
++#include <cstdlib>
+ #include <fcntl.h>
+ #include <unistd.h>
+ 
+@@ -21,7 +22,9 @@ void JITSymbols::InitFile() {
+   // Android simpleperf looks in /data/local/tmp instead of /tmp
+   const auto PerfMap = fextl::fmt::format("/data/local/tmp/perf-{}.map", getpid());
+ #else
+-  const auto PerfMap = fextl::fmt::format("/tmp/perf-{}.map", getpid());
++  // fexdroid: an Android app has no /tmp; FEX_PERFMAP_DIR names a directory it can write to.
++  const char* Dir = getenv("FEX_PERFMAP_DIR");
++  const auto PerfMap = fextl::fmt::format("{}/perf-{}.map", Dir ? Dir : "/tmp", getpid());
+ #endif
+   fd = open(PerfMap.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_APPEND, 0644);
+ }

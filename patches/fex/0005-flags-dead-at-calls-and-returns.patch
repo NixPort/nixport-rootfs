@@ -1,0 +1,99 @@
+From: fexdroid
+Subject: [PATCH] OpcodeDispatcher: flags are dead at calls and returns in listed modules
+
+The x86-64 ABI leaves the arithmetic flags undefined at a call and at a return,
+and compiled code does not read them across either. FEX keeps them alive at every
+exit of a block: the carry is put in its canonical polarity (mrs/eor/msr on a CPU
+without FlagM) and the sources of PF and AF are stored.
+
+With ABILocalFlags=1, in the modules ExtendedVolatileMetadata lists by name, the
+flags are invalidated after the flush at a call and at a return, so the pass that
+removes dead flag calculations drops what led to them.
+
+Local patch, not upstream (NOTES.md N-047).
+---
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index 136aa1c..3a96919 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -596,6 +596,15 @@
+           "When metadata is unavailable falls back to the currently enabled TSO options."
+         ]
+       },
++      "ABILocalFlags": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "Assumes the arithmetic flags are dead at calls and returns, as the x86-64 ABI has them,",
++          "in the modules that ExtendedVolatileMetadata lists by name. Their calculation is dropped there."
++        ]
++      },
+       "X87ReducedPrecision": {
+         "Type": "bool",
+         "Default": "false",
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index ffabdbd..87e89e0 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -366,6 +366,7 @@ public:
+     FEX_CONFIG_OPT(BlockJITNaming, BLOCKJITNAMING);
+     FEX_CONFIG_OPT(GDBSymbols, GDBSYMBOLS);
+     FEX_CONFIG_OPT(x87ReducedPrecision, X87REDUCEDPRECISION);
++    FEX_CONFIG_OPT(ABILocalFlags, ABILOCALFLAGS);
+     FEX_CONFIG_OPT(DisableTelemetry, DISABLETELEMETRY);
+     FEX_CONFIG_OPT(DisableVixlIndirectCalls, DISABLE_VIXL_INDIRECT_RUNTIME_CALLS);
+     FEX_CONFIG_OPT(SmallTSCScale, SMALLTSCSCALE);
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index cf073ce..e12403d 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -587,6 +587,9 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+         }
+       }
+ 
++      // fexdroid: the modules listed by name are the program's own compiled code.
++      Thread->OpDispatcher->SetFlagsDeadAtCallReturn(BlockInForceTSOValidRange && Config.ABILocalFlags());
++
+       // Set the block entry point
+       Thread->OpDispatcher->SetNewBlockIfChanged(Block.Entry);
+ 
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index ff5c389..dd1842f 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -198,13 +198,26 @@ public:
+     auto Cond = Set ? CondClass::TSTNZ : CondClass::TSTZ;
+     return _CondJump(Src, InlineConst, InvalidNode, InvalidNode, Cond, OpSize::iInvalid, false);
+   }
++  // fexdroid: the x86-64 ABI leaves the flags undefined at a call and at a return. Said after
++  // the flush, so that what the flush wrote for the flags (carry polarity, PF, AF) is dead too.
++  void FlagsDieAtCallReturn(BranchHint Hint) {
++    if (FlagsDeadAtCallReturn && (Hint == BranchHint::Call || Hint == BranchHint::Return)) {
++      _InvalidateFlags((1u << X86State::RFLAG_CF_RAW_LOC) | (1u << X86State::RFLAG_PF_RAW_LOC) | (1u << X86State::RFLAG_AF_RAW_LOC) |
++                       (1u << X86State::RFLAG_ZF_RAW_LOC) | (1u << X86State::RFLAG_SF_RAW_LOC) | (1u << X86State::RFLAG_OF_RAW_LOC));
++    }
++  }
++  void SetFlagsDeadAtCallReturn(bool Dead) {
++    FlagsDeadAtCallReturn = Dead;
++  }
+   IRPair<IROp_ExitFunction> ExitFunction(Ref NewRIP, BranchHint Hint = BranchHint::None) {
+     FlushRegisterCache();
++    FlagsDieAtCallReturn(Hint);
+     return _ExitFunction(GetOpSize(NewRIP), NewRIP, Hint, InvalidNode, InvalidNode);
+   }
+   IRPair<IROp_ExitFunction> ExitFunction(Ref NewRIP, BranchHint Hint, Ref CallReturnAddress, Ref CallReturnBlock,
+                                          uint64_t PatchSiteAddress = 0, uint64_t PatchSiteSize = 0) {
+     FlushRegisterCache();
++    FlagsDieAtCallReturn(Hint);
+     return _ExitFunction(GetOpSize(NewRIP), NewRIP, Hint, CallReturnAddress, CallReturnBlock, PatchSiteAddress, PatchSiteSize);
+   }
+   IRPair<IROp_Break> Break(BreakDefinition Reason) {
+@@ -1348,6 +1361,7 @@ private:
+   bool DecodeFailure {false};
+   bool NeedsBlockEnd {false};
+   ForceTSOMode ForceTSO {ForceTSOMode::NoOverride};
++  bool FlagsDeadAtCallReturn {false};
+   // Used during new op bringup
+   bool ShouldDump {false};
+ 

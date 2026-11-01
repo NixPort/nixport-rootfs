@@ -1,0 +1,488 @@
+fexdroid: programs made for an ordinary Linux start on Android
+
+Android has no /lib/ld-linux-aarch64.so.1, no /bin/bash, and its kernel has no
+binfmt_misc entry for x86 programs.  execve looks at the file first and starts
+  - an arm64 program with that interpreter through the rootfs's loader,
+  - a "#!" script with the interpreter of the rootfs,
+  - an x86 program through FEX,
+  - a program under /bin, /sbin, /usr, /opt from the rootfs when it is there.
+A program started through the loader sees its own path in /proc/self/exe and
+starts itself again through that link as before (Chromium does).
+
+Needed for Valve's native arm64 Steam client, whose files are not changed.
+See NOTES.md N-050.
+
+get_robust_list answers with glibc's own list of the thread (set_robust_list is
+trapped by Android's filter, so the kernel has none): Valve's client asks for it.
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/execve.c b/sysdeps/unix/sysv/linux/aarch64/execve.c
+--- a/sysdeps/unix/sysv/linux/aarch64/execve.c
++++ b/sysdeps/unix/sysv/linux/aarch64/execve.c
+@@ -0,0 +1,217 @@
++/* fexdroid: execve for programs made for an ordinary Linux.
++
++   Looked at before the kernel is asked:
++   - an arm64 program whose interpreter is ld-linux-aarch64.so.1 outside the
++     rootfs (Android has no /lib) runs as "ld.so --argv0 name program args";
++   - a script whose "#!" interpreter is in the rootfs runs with that one
++     (Android's /bin/sh is not what Linux scripts expect, /bin/bash is not
++     there at all);
++   - an x86 program runs as "FEX program args", which is what binfmt_misc
++     does on a Linux with FEX installed;
++   - "/proc/self/exe" means the program, not the loader (fxd-exe.c);
++   - a program under /bin, /sbin, /usr or /opt is the one in the rootfs when
++     the rootfs has it (system() starts "/bin/sh").
++   Anything else goes to the kernel as it is.  See NOTES.md N-050.  */
++#include <alloca.h>
++#include <elf.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <not-cancel.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sysdep.h>
++#include <unistd.h>
++#include "fxd-exec-config.h"
++#include "fxd-exe.h"
++
++#define FXD_HEAD 2048
++#define FXD_LDSO_NAME "ld-linux-aarch64.so.1"
++
++static int
++fxd_exists (const char *path)
++{
++  return INLINE_SYSCALL_CALL (faccessat, AT_FDCWD, path, F_OK) == 0;
++}
++
++static int
++fxd_in_rootfs (const char *path)
++{
++  size_t n = sizeof (FXD_EXEC_ROOT) - 1;
++  return strncmp (path, FXD_EXEC_ROOT, n) == 0 && (path[n] == '/' || path[n] == '\0');
++}
++
++/* PATH with up to three words put before it; the first word is the program
++   the kernel gets.  ARGV0 replaces argv[0] when not NULL.  */
++static int
++fxd_exec_with (const char *w0, const char *w1, const char *w2, const char *path,
++	       char *const argv[], char *const envp[])
++{
++  size_t argc = 0;
++  while (argv[argc] != NULL)
++    argc++;
++  size_t size = (argc + 5) * sizeof (char *);
++  char **v;
++  /* A spawned child has a stack of 32 kB plus its arguments.  */
++  if (size <= 8192)
++    v = alloca (size);
++  else
++    {
++      v = __mmap (NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++      if (v == MAP_FAILED)
++	return -1;
++    }
++  size_t n = 0;
++  v[n++] = (char *) w0;
++  if (w1 != NULL)
++    v[n++] = (char *) w1;
++  if (w2 != NULL)
++    v[n++] = (char *) w2;
++  v[n++] = (char *) path;
++  for (size_t i = 1; i < argc; i++)
++    v[n++] = argv[i];
++  v[n] = NULL;
++  return INLINE_SYSCALL_CALL (execve, w0, v, envp);
++}
++
++int
++__execve (const char *path, char *const argv[], char *const envp[])
++{
++  if (path == NULL || argv == NULL)
++    return INLINE_SYSCALL_CALL (execve, path, argv, envp);
++
++  char full[PATH_MAX];
++  if (__fxd_is_self_exe (path))
++    {
++      const char *program = __fxd_program ();
++      if (program != NULL)
++	path = program;
++    }
++
++  /* "/bin/sh", "/usr/bin/env": the rootfs has the Linux one.  */
++  char mapped[PATH_MAX];
++  if (path[0] == '/' && !fxd_in_rootfs (path)
++      && (strncmp (path, "/bin/", 5) == 0 || strncmp (path, "/usr/", 5) == 0
++	  || strncmp (path, "/sbin/", 6) == 0 || strncmp (path, "/opt/", 5) == 0)
++      && sizeof (FXD_EXEC_ROOT) + strlen (path) <= sizeof mapped)
++    {
++      strcpy (mapped, FXD_EXEC_ROOT);
++      strcat (mapped, path);
++      if (fxd_exists (mapped))
++	path = mapped;
++    }
++
++  int fd = __open64_nocancel (path, O_RDONLY | O_CLOEXEC);
++  if (fd < 0)
++    return INLINE_SYSCALL_CALL (execve, path, argv, envp);
++  unsigned char head[FXD_HEAD];
++  ssize_t got = __pread64_nocancel (fd, head, sizeof head - 1, 0);
++  char interp[256];
++  interp[0] = '\0';
++
++  if (got >= (ssize_t) sizeof (Elf64_Ehdr) && memcmp (head, ELFMAG, SELFMAG) == 0)
++    {
++      const Elf64_Ehdr *eh = (const Elf64_Ehdr *) head;
++      if (eh->e_machine == EM_X86_64 || eh->e_machine == EM_386)
++	{
++	  __close_nocancel (fd);
++	  if (fxd_exists (FXD_EXEC_FEX))
++	    return fxd_exec_with (FXD_EXEC_FEX, NULL, NULL, path, argv, envp);
++	  return INLINE_SYSCALL_CALL (execve, path, argv, envp);
++	}
++      if (head[EI_CLASS] == ELFCLASS64 && eh->e_machine == EM_AARCH64
++	  && eh->e_phentsize == sizeof (Elf64_Phdr))
++	for (unsigned int i = 0; i < eh->e_phnum; i++)
++	  {
++	    Elf64_Phdr ph;
++	    if (__pread64_nocancel (fd, &ph, sizeof ph, eh->e_phoff + (off64_t) i * sizeof ph)
++		!= (ssize_t) sizeof ph)
++	      break;
++	    if (ph.p_type != PT_INTERP)
++	      continue;
++	    if (ph.p_filesz > 0 && ph.p_filesz < sizeof interp
++		&& __pread64_nocancel (fd, interp, ph.p_filesz, ph.p_offset) == (ssize_t) ph.p_filesz)
++	      interp[ph.p_filesz] = '\0';
++	    else
++	      interp[0] = '\0';
++	    break;
++	  }
++      __close_nocancel (fd);
++
++      const char *name = strrchr (interp, '/');
++      if (name != NULL && strcmp (name + 1, FXD_LDSO_NAME) == 0 && !fxd_in_rootfs (interp)
++	  && !fxd_exists (interp))
++	{
++	  /* The loader takes the program's place in /proc/self/exe, so the
++	     program's name has to be whole: fxd-exe.c gives it out.  */
++	  if (path[0] != '/')
++	    {
++	      if (__getcwd (full, sizeof full) != NULL
++		  && strlen (full) + strlen (path) + 2 <= sizeof full)
++		{
++		  strcat (full, "/");
++		  strcat (full, path);
++		  path = full;
++		}
++	    }
++	  return fxd_exec_with (FXD_EXEC_LDSO, "--argv0", argv[0] != NULL ? argv[0] : path,
++				path, argv, envp);
++	}
++      return INLINE_SYSCALL_CALL (execve, path, argv, envp);
++    }
++
++  __close_nocancel (fd);
++  if (got > 2 && head[0] == '#' && head[1] == '!')
++    {
++      /* "#! interpreter [one argument]", as the kernel reads it.  */
++      head[got] = '\0';
++      char *line = (char *) head + 2;
++      char *end = strchr (line, '\n');
++      if (end == NULL)
++	return INLINE_SYSCALL_CALL (execve, path, argv, envp);
++      *end = '\0';
++      while (*line == ' ' || *line == '\t')
++	line++;
++      char *arg = line;
++      while (*arg != '\0' && *arg != ' ' && *arg != '\t')
++	arg++;
++      if (*arg != '\0')
++	{
++	  *arg++ = '\0';
++	  while (*arg == ' ' || *arg == '\t')
++	    arg++;
++	  char *tail = arg + strlen (arg);
++	  while (tail > arg && (tail[-1] == ' ' || tail[-1] == '\t' || tail[-1] == '\r'))
++	    *--tail = '\0';
++	}
++      if (line[0] == '/' && !fxd_in_rootfs (line)
++	  && sizeof (FXD_EXEC_ROOT) + strlen (line) <= sizeof full)
++	{
++	  strcpy (full, FXD_EXEC_ROOT);
++	  strcat (full, line);
++	  if (fxd_exists (full))
++	    /* Through this function again: the interpreter is a program too.  */
++	    {
++	      size_t argc = 0;
++	      while (argv[argc] != NULL)
++		argc++;
++	      size_t size = (argc + 4) * sizeof (char *);
++	      char **v = size <= 8192 ? alloca (size)
++			 : __mmap (NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	      if (v == MAP_FAILED)
++		return -1;
++	      size_t n = 0;
++	      v[n++] = line;
++	      if (*arg != '\0')
++		v[n++] = arg;
++	      v[n++] = (char *) path;
++	      for (size_t i = 1; i < argc; i++)
++		v[n++] = argv[i];
++	      v[n] = NULL;
++	      return INLINE_SYSCALL_CALL (execve, full, v, envp);
++	    }
++	}
++    }
++  return INLINE_SYSCALL_CALL (execve, path, argv, envp);
++}
++weak_alias (__execve, execve)
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/fxd-exe.c b/sysdeps/unix/sysv/linux/aarch64/fxd-exe.c
+--- a/sysdeps/unix/sysv/linux/aarch64/fxd-exe.c
++++ b/sysdeps/unix/sysv/linux/aarch64/fxd-exe.c
+@@ -0,0 +1,86 @@
++/* fexdroid: which program is this, when the kernel ran the loader?
++
++   Android has no /lib/ld-linux-aarch64.so.1, so a program that names it as
++   its interpreter is started as "ld.so program args" (execve.c).  For the
++   kernel the process then runs ld.so: /proc/self/exe points to the loader,
++   and a program that starts copies of itself through that link (Chromium
++   does) would start the loader with its own arguments.  */
++#include <fcntl.h>
++#include <limits.h>
++#include <not-cancel.h>
++#include <string.h>
++#include <sys/auxv.h>
++#include <unistd.h>
++#include <_itoa.h>
++#include <atomic.h>
++#include "fxd-exe.h"
++
++/* The loader gives the main program an empty name and execve.c may have
++   given it another argv[0], so the name is read from what the kernel
++   remembers of the command line: "ld.so [--argv0 name] program args".  */
++static char fxd_program_path[PATH_MAX];
++static int fxd_program_state;	/* 0 not looked for, 1 found, 2 there is none */
++
++const char *
++__fxd_program (void)
++{
++  int state = atomic_load_relaxed (&fxd_program_state);
++  if (state != 0)
++    return state == 1 ? fxd_program_path : NULL;
++  /* With an interpreter AT_BASE is where the kernel put it; it is 0 when
++     the loader itself is what the kernel ran.  */
++  if (__getauxval (AT_BASE) != 0)
++    {
++      atomic_store_relaxed (&fxd_program_state, 2);
++      return NULL;
++    }
++  char line[PATH_MAX + 1024];
++  int fd = __open64_nocancel ("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
++  ssize_t n = fd < 0 ? -1 : __read_nocancel (fd, line, sizeof line - 1);
++  if (fd >= 0)
++    __close_nocancel (fd);
++  const char *found = NULL;
++  if (n > 0)
++    {
++      line[n] = '\0';
++      const char *end = line + n;
++      const char *w = line;
++      const char *name = strrchr (w, '/');
++      if (strncmp (name != NULL ? name + 1 : w, "ld-linux-", 9) == 0)
++	{
++	  w += strlen (w) + 1;
++	  if (w < end && strcmp (w, "--argv0") == 0)
++	    {
++	      w += strlen (w) + 1;
++	      if (w < end)
++		w += strlen (w) + 1;
++	    }
++	  if (w < end && w[0] == '/' && strlen (w) < sizeof fxd_program_path)
++	    found = w;
++	}
++    }
++  if (found == NULL)
++    {
++      atomic_store_relaxed (&fxd_program_state, 2);
++      return NULL;
++    }
++  /* Two threads here write the same bytes.  */
++  strcpy (fxd_program_path, found);
++  atomic_store_relaxed (&fxd_program_state, 1);
++  return fxd_program_path;
++}
++
++int
++__fxd_is_self_exe (const char *path)
++{
++  if (path == NULL || strncmp (path, "/proc/", 6) != 0)
++    return 0;
++  const char *p = path + 6;
++  if (strcmp (p, "self/exe") == 0 || strcmp (p, "thread-self/exe") == 0)
++    return 1;
++  char buf[3 * sizeof (pid_t) + 1];
++  buf[sizeof buf - 1] = '\0';
++  const char *pid = _itoa_word (__getpid (), buf + sizeof buf - 1, 10, 0);
++  size_t n = strlen (pid);
++  return strncmp (p, pid, n) == 0 && strcmp (p + n, "/exe") == 0;
++}
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/fxd-exec-config.h b/sysdeps/unix/sysv/linux/aarch64/fxd-exec-config.h
+--- a/sysdeps/unix/sysv/linux/aarch64/fxd-exec-config.h
++++ b/sysdeps/unix/sysv/linux/aarch64/fxd-exec-config.h
+@@ -0,0 +1,11 @@
++/* fexdroid: where programs made for an ordinary Linux find what Android does
++   not have.  scripts/build-glibc.sh rewrites the three paths (sed) to the
++   on-device rootfs before building.  */
++#ifndef _FXD_EXEC_CONFIG_H
++#define _FXD_EXEC_CONFIG_H 1
++
++#define FXD_EXEC_ROOT "/fxd-root"
++#define FXD_EXEC_LDSO "/lib/ld-linux-aarch64.so.1"
++#define FXD_EXEC_FEX  "/usr/bin/FEX"
++
++#endif /* fxd-exec-config.h */
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/fxd-exe.h b/sysdeps/unix/sysv/linux/aarch64/fxd-exe.h
+--- a/sysdeps/unix/sysv/linux/aarch64/fxd-exe.h
++++ b/sysdeps/unix/sysv/linux/aarch64/fxd-exe.h
+@@ -0,0 +1,13 @@
++/* fexdroid: programs started through the loader (see execve.c).  */
++#ifndef _FXD_EXE_H
++#define _FXD_EXE_H 1
++#include <stddef.h>
++
++/* The program this process runs, when the kernel was given the loader
++   instead of it; NULL when the kernel was given the program itself.  */
++extern const char *__fxd_program (void) attribute_hidden;
++
++/* True for "/proc/self/exe" and "/proc/<our pid>/exe".  */
++extern int __fxd_is_self_exe (const char *path) attribute_hidden;
++
++#endif /* fxd-exe.h */
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/fxd-syscall.c b/sysdeps/unix/sysv/linux/aarch64/fxd-syscall.c
+--- a/sysdeps/unix/sysv/linux/aarch64/fxd-syscall.c
++++ b/sysdeps/unix/sysv/linux/aarch64/fxd-syscall.c
+@@ -7,6 +7,10 @@
+ #include <sys/socket.h>
+ #include <sysdep.h>
+ #include <fxshm.h>
++#include <ldsodefs.h>
++#include <list.h>
++#include <lowlevellock.h>
++#include <pthreadP.h>
+ #include "fxd-android-seccomp.h"
+ 
+ extern long int __fxd_raw_syscall (long int number, ...);
+@@ -50,6 +54,43 @@
+ 			    (unsigned long int) a3);
+       case __NR_accept:
+ 	return accept4 ((int) a0, (struct sockaddr *) a1, (socklen_t *) a2, 0);
++      case __NR_get_robust_list:
++	{
++	  /* The list set_robust_list would have given the kernel is glibc's
++	     own, in the thread's descriptor.  Valve's Steam client asks for
++	     it to put its locks in shared memory on it, and falls over a
++	     NULL when there is none.  */
++	  struct pthread *self = THREAD_SELF;
++	  struct pthread *pd = NULL;
++	  if (a0 == 0 || a0 == THREAD_GETMEM (self, tid))
++	    pd = self;
++	  else
++	    {
++	      lll_lock (GL (dl_stack_cache_lock), LLL_PRIVATE);
++	      list_t *runp;
++	      list_for_each (runp, &GL (dl_stack_used))
++		{
++		  struct pthread *t = list_entry (runp, struct pthread, list);
++		  if (t->tid == a0)
++		    pd = t;
++		}
++	      list_for_each (runp, &GL (dl_stack_user))
++		{
++		  struct pthread *t = list_entry (runp, struct pthread, list);
++		  if (t->tid == a0)
++		    pd = t;
++		}
++	      lll_unlock (GL (dl_stack_cache_lock), LLL_PRIVATE);
++	    }
++	  if (pd == NULL || a1 == 0 || a2 == 0)
++	    {
++	      __set_errno (pd == NULL ? ESRCH : EFAULT);
++	      return -1;
++	    }
++	  *(void **) a1 = &pd->robust_head;
++	  *(size_t *) a2 = sizeof (struct robust_list_head);
++	  return 0;
++	}
+       case __NR_set_robust_list:
+ 	/* Accept the registration; only the kernel's cleanup of robust
+ 	   mutexes held by a dying thread is lost (see patch 0001).  */
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/Makefile b/sysdeps/unix/sysv/linux/aarch64/Makefile
+--- a/sysdeps/unix/sysv/linux/aarch64/Makefile
++++ b/sysdeps/unix/sysv/linux/aarch64/Makefile
+@@ -150,3 +150,8 @@
+ ifeq ($(subdir),misc)
+ sysdep_routines += fxd-syscall
+ endif
++
++# fexdroid: which program runs when the kernel was given the loader (fxd-exe.c)
++ifeq ($(subdir),posix)
++sysdep_routines += fxd-exe
++endif
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/readlinkat.c b/sysdeps/unix/sysv/linux/aarch64/readlinkat.c
+--- a/sysdeps/unix/sysv/linux/aarch64/readlinkat.c
++++ b/sysdeps/unix/sysv/linux/aarch64/readlinkat.c
+@@ -0,0 +1,25 @@
++/* fexdroid: readlinkat; see readlink.c.  */
++#include <fcntl.h>
++#include <string.h>
++#include <sysdep.h>
++#include <unistd.h>
++#include "fxd-exe.h"
++
++ssize_t
++readlinkat (int fd, const char *path, char *buf, size_t len)
++{
++  if (__glibc_unlikely (__fxd_is_self_exe (path)))
++    {
++      const char *program = __fxd_program ();
++      if (program != NULL)
++	{
++	  size_t n = strlen (program);
++	  if (n > len)
++	    n = len;
++	  memcpy (buf, program, n);
++	  return n;
++	}
++    }
++  return INLINE_SYSCALL_CALL (readlinkat, fd, path, buf, len);
++}
++libc_hidden_def (readlinkat)
+diff --color -urN a/sysdeps/unix/sysv/linux/aarch64/readlink.c b/sysdeps/unix/sysv/linux/aarch64/readlink.c
+--- a/sysdeps/unix/sysv/linux/aarch64/readlink.c
++++ b/sysdeps/unix/sysv/linux/aarch64/readlink.c
+@@ -0,0 +1,26 @@
++/* fexdroid: readlink; /proc/self/exe names the program, not the loader that
++   the kernel was given in its place (fxd-exe.c).  */
++#include <fcntl.h>
++#include <string.h>
++#include <sysdep.h>
++#include <unistd.h>
++#include "fxd-exe.h"
++
++ssize_t
++__readlink (const char *path, char *buf, size_t len)
++{
++  if (__glibc_unlikely (__fxd_is_self_exe (path)))
++    {
++      const char *program = __fxd_program ();
++      if (program != NULL)
++	{
++	  size_t n = strlen (program);
++	  if (n > len)
++	    n = len;
++	  memcpy (buf, program, n);
++	  return n;
++	}
++    }
++  return INLINE_SYSCALL_CALL (readlinkat, AT_FDCWD, path, buf, len);
++}
++weak_alias (__readlink, readlink)

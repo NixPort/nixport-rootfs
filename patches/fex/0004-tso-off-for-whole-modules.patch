@@ -1,0 +1,26 @@
+From: fexdroid
+Subject: [PATCH] Core: TSO off in valid ranges also for blocks with no volatile instruction
+
+ExtendedVolatileMetadata with only a module name ("disable TSO for a full
+module") had no effect: the override was set only for blocks that contain an
+instruction listed as needing TSO, and such a module lists none.
+
+Local patch, not upstream (NOTES.md N-041).
+---
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 8286c14..cf073ce 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -579,9 +579,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+       bool BlockInForceTSOValidRange = false;
+       auto InstForceTSOIt = ForceTSOInstructions.end();
+       if (ForceTSOValidRanges.Contains({Block.Entry, Block.Entry + Block.Size})) {
++        // fexdroid: a block in a valid range with no instruction that needs TSO is the common case
++        // (a module listed by name only has none at all) and is the one that must run without TSO.
++        BlockInForceTSOValidRange = true;
+         if (auto It = ForceTSOInstructions.lower_bound(Block.Entry); It != ForceTSOInstructions.end() && *It < Block.Entry + Block.Size) {
+           InstForceTSOIt = It;
+-          BlockInForceTSOValidRange = true;
+         }
+       }
+ 

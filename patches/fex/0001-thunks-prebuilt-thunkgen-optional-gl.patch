@@ -1,0 +1,156 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 87b7c31..c48680f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -40,6 +40,12 @@ option(BUILD_STEAM_SUPPORT "Enable Steam integration" FALSE)
+ set(X86_32_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Data/CMake/toolchain_x86_32.cmake" CACHE FILEPATH "Toolchain file for the (cross-)compiler targeting i686")
+ set(X86_64_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Data/CMake/toolchain_x86_64.cmake" CACHE FILEPATH "Toolchain file for the (cross-)compiler targeting x86_64")
+ set(X86_DEV_ROOTFS "/" CACHE FILEPATH "Path to the sysroot used for cross-compiling for i686 and x86_64")
++# fexdroid: when the main build is itself a cross-compile, thunkgen cannot be built
++# here (it must run on the build machine and link the build machine's libclang).
++# Point THUNKGEN_EXE at a natively built thunkgen instead.
++set(THUNKGEN_EXE "" CACHE FILEPATH "Prebuilt thunkgen executable to use instead of building ThunkLibs/Generator")
++option(THUNKS_ENABLE_GL "Build the GL/EGL thunks (needs GL/EGL headers and libGL in both sysroots)" TRUE)
++option(THUNKS_ENABLE_32BIT_GUEST "Build the 32-bit (i686) guest thunks and their host counterparts" TRUE)
+ set(DATA_DIRECTORY "" CACHE PATH "Global data directory (override)")
+ set(HOSTLIBS_DATA_DIRECTORY "" CACHE PATH "Global data directory (override)")
+ 
+@@ -644,7 +650,14 @@ endif()
+ 
+ if (BUILD_THUNKS)
+   set(FEX_PROJECT_SOURCE_DIR ${PROJECT_SOURCE_DIR})
+-  add_subdirectory(ThunkLibs/Generator)
++  if (THUNKGEN_EXE)
++    add_executable(thunkgen IMPORTED GLOBAL)
++    set_target_properties(thunkgen PROPERTIES IMPORTED_LOCATION "${THUNKGEN_EXE}")
++    set(THUNKGEN_DEPENDS "")
++  else()
++    add_subdirectory(ThunkLibs/Generator)
++    set(THUNKGEN_DEPENDS DEPENDS thunkgen)
++  endif()
+ 
+   # Thunk targets for both host libraries and IDE integration
+   add_subdirectory(ThunkLibs/HostLibs)
+@@ -668,10 +681,12 @@ if (BUILD_THUNKS)
+       "-DFEX_PROJECT_SOURCE_DIR=${FEX_PROJECT_SOURCE_DIR}"
+       "-DGENERATOR_EXE=$<TARGET_FILE:thunkgen>"
+       "-DX86_DEV_ROOTFS=${X86_DEV_ROOTFS}"
++      "-DTHUNKS_ENABLE_GL=${THUNKS_ENABLE_GL}"
+     INSTALL_COMMAND ""
+     BUILD_ALWAYS ON
+-    DEPENDS thunkgen)
++    ${THUNKGEN_DEPENDS})
+ 
++  if (THUNKS_ENABLE_32BIT_GUEST)
+   ExternalProject_Add(guest-libs-32
+     PREFIX guest-libs-32
+     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ThunkLibs/GuestLibs"
+@@ -686,9 +701,11 @@ if (BUILD_THUNKS)
+       "-DFEX_PROJECT_SOURCE_DIR=${FEX_PROJECT_SOURCE_DIR}"
+       "-DGENERATOR_EXE=$<TARGET_FILE:thunkgen>"
+       "-DX86_DEV_ROOTFS=${X86_DEV_ROOTFS}"
++      "-DTHUNKS_ENABLE_GL=${THUNKS_ENABLE_GL}"
+     INSTALL_COMMAND ""
+     BUILD_ALWAYS ON
+-    DEPENDS thunkgen)
++    ${THUNKGEN_DEPENDS})
++  endif()
+ 
+   install(
+     CODE "message(\"-- Installing: guest-libs\")"
+@@ -698,6 +715,7 @@ if (BUILD_THUNKS)
+     DEPENDS guest-libs
+     COMPONENT Runtime)
+ 
++  if (THUNKS_ENABLE_32BIT_GUEST)
+   install(
+     CODE "message(\"-- Installing: guest-libs-32\")"
+     CODE "
+@@ -705,17 +723,19 @@ if (BUILD_THUNKS)
+         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest_32)"
+     DEPENDS guest-libs-32
+     COMPONENT Runtime)
++  endif()
+ 
+   add_custom_target(uninstall_guest-libs
+     COMMAND ${CMAKE_COMMAND} "--build" "." "--target" "uninstall"
+     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest)
+ 
++  add_dependencies(uninstall uninstall_guest-libs)
++  if (THUNKS_ENABLE_32BIT_GUEST)
+   add_custom_target(uninstall_guest-libs-32
+     COMMAND ${CMAKE_COMMAND} "--build" "." "--target" "uninstall"
+     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Guest_32)
+-
+-  add_dependencies(uninstall uninstall_guest-libs)
+   add_dependencies(uninstall uninstall_guest-libs-32)
++  endif()
+ endif()
+ 
+ if (NOT MINGW AND BUILD_STEAM_SUPPORT)
+diff --git a/ThunkLibs/GuestLibs/CMakeLists.txt b/ThunkLibs/GuestLibs/CMakeLists.txt
+index 0b30692..6869d6c 100644
+--- a/ThunkLibs/GuestLibs/CMakeLists.txt
++++ b/ThunkLibs/GuestLibs/CMakeLists.txt
+@@ -251,6 +251,10 @@ if (BUILD_FEX_LINUX_TESTS)
+   add_guest_lib(fex_thunk_test "libfex_thunk_test.so")
+ endif()
+ 
++if (NOT DEFINED THUNKS_ENABLE_GL)
++  set(THUNKS_ENABLE_GL TRUE)
++endif()
++if (THUNKS_ENABLE_GL)
+ generate(libGL ${CMAKE_CURRENT_SOURCE_DIR}/../libGL/libGL_interface.cpp)
+ target_include_directories_from_pkgconfig(libGL-guest-deps gl)
+ target_include_directories_from_pkgconfig(libGL-guest-deps "xcb;x11;xrandr;xrender")
+@@ -266,6 +270,7 @@ add_library(PlaceholderX11 SHARED ../libX11/libX11_NativeGuest.cpp)
+ target_link_options(PlaceholderX11 PRIVATE "LINKER:-soname,libX11.so.6")
+ set_target_properties(PlaceholderX11 PROPERTIES NO_SONAME ON)
+ target_link_libraries(GL-guest PRIVATE PlaceholderX11)
++endif()
+ 
+ generate(libcuda ${CMAKE_CURRENT_SOURCE_DIR}/../libcuda/libcuda_interface.cpp)
+ add_guest_lib(cuda "libcuda.so.1")
+diff --git a/ThunkLibs/HostLibs/CMakeLists.txt b/ThunkLibs/HostLibs/CMakeLists.txt
+index a526c72..c04567e 100644
+--- a/ThunkLibs/HostLibs/CMakeLists.txt
++++ b/ThunkLibs/HostLibs/CMakeLists.txt
+@@ -70,8 +70,8 @@ function(generate NAME SOURCE_FILE GUEST_BITNESS)
+   add_custom_command(
+     OUTPUT "${OUTFILE}"
+     DEPENDS "${SOURCE_FILE}"
+-    DEPENDS thunkgen
+-    COMMAND thunkgen "${SOURCE_FILE}" "${NAME}" "-host" "${OUTFILE}" "${X86_DEV_ROOTFS}" ${BITNESS_FLAGS} -- -std=c++20
++    DEPENDS "$<TARGET_FILE:thunkgen>"
++    COMMAND "$<TARGET_FILE:thunkgen>" "${SOURCE_FILE}" "${NAME}" "-host" "${OUTFILE}" "${X86_DEV_ROOTFS}" ${BITNESS_FLAGS} -- -std=c++20
+       ${THUNKGEN_SYSTEM_INCLUDES}
+       # Expand compile definitions to space-separated list of -D parameters
+       "$<$<BOOL:${compile_prop}>:;-D$<JOIN:${compile_prop},;-D>>"
+@@ -140,7 +140,10 @@ foreach(GUEST_BITNESS IN LISTS BITNESS_LIST)
+   add_host_lib(drm ${GUEST_BITNESS})
+ endforeach()
+ 
+-set(BITNESS_LIST "32;64")
++set(BITNESS_LIST "64")
++if (THUNKS_ENABLE_32BIT_GUEST)
++  set(BITNESS_LIST "32;64")
++endif()
+ foreach(GUEST_BITNESS IN LISTS BITNESS_LIST)
+   if (BUILD_FEX_LINUX_TESTS)
+     generate(libfex_thunk_test ${CMAKE_CURRENT_SOURCE_DIR}/../libfex_thunk_test/libfex_thunk_test_interface.cpp ${GUEST_BITNESS})
+@@ -156,6 +159,7 @@ foreach(GUEST_BITNESS IN LISTS BITNESS_LIST)
+   add_host_lib(wayland-client ${GUEST_BITNESS})
+   target_include_directories_from_pkgconfig(libwayland-client-${GUEST_BITNESS}-deps wayland-client /usr/include/wayland)
+ 
++  if (THUNKS_ENABLE_GL)
+   generate(libEGL ${CMAKE_CURRENT_SOURCE_DIR}/../libEGL/libEGL_interface.cpp ${GUEST_BITNESS})
+   target_include_directories_from_pkgconfig(libEGL-${GUEST_BITNESS}-deps egl)
+   add_host_lib(EGL ${GUEST_BITNESS})
+@@ -167,6 +171,7 @@ foreach(GUEST_BITNESS IN LISTS BITNESS_LIST)
+ 
+   find_package(OpenGL REQUIRED)
+   target_link_libraries(GL-host-${GUEST_BITNESS} PRIVATE OpenGL::GL)
++  endif()
+ 
+   generate(libcuda ${CMAKE_CURRENT_SOURCE_DIR}/../libcuda/libcuda_interface.cpp ${GUEST_BITNESS})
+   add_host_lib(cuda ${GUEST_BITNESS})
