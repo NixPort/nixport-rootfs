@@ -114,7 +114,14 @@ docker run --platform "$PLATFORM" --name "$cname" -v "$PWD/$OUT:/out" "$IMAGE" b
   # BUGFIX: uris lines START with a quote ('http://...), so `grep '^http'` matched
   # nothing and `apt-get install` succeeded vacuously — the tree kept only the base
   # (78 packages vs 325 before). Extract quoted URLs with sed; smoke adds sentinels.
-  apt-get install -y --no-install-recommends \$(grep -o \"'http[^']*\" /out/rootfs-arm64.uris.txt | tr -d \"'\")
+  # 安装直接走包清单（与 build-rootfs.sh 同款、久经验证的路径）；uris.txt 仅作
+  # 记录（nxp-rootfs-topup.sh 消费）。URL 锁定安装已被证伪：uris 行首引号 + apt
+  # 的 URL 参数解析三层引号纠缠（grep '^http' 空匹配 → 树只剩基底 78 包）。
+  # Install directly from the package list (same proven path as build-rootfs.sh);
+  # uris.txt stays as a RECORD (consumed by nxp-rootfs-topup.sh). The URL-lock
+  # install is disproven: three layers of quoting around quoted URL lines broke
+  # silently (tree was base-only, 78 packages).
+  apt-get install -y --no-install-recommends ${RUNTIME_PKGS[*]} >/dev/null
   apt-get clean
   rm -rf /var/lib/apt/lists/*
   # Private library dirs: Debian resolves e.g. libpulsecommon-17.0.so (in

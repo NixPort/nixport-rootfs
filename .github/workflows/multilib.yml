@@ -56,22 +56,12 @@ jobs:
           ls -la build/release/multilib
 
       # meta 合并：取现存 meta，更新 multilib 条目，其余保留（部分重建语义）。
-      - name: Fetch current meta
+      # 渠道自足：multilib 渠道的 meta 只含本渠道资产，无需 BASE_META 合并
+      # （多渠道拆分后各渠道独立滚动）。
+      - name: Meta (multilib channel, self-contained)
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p build/release-current
-          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
-            -p meta.json -O build/release-current/meta.json 2>/dev/null \
-            || echo "no existing release meta (first run?)"
-
-      - name: Meta
-        shell: bash
-        env:
-          BASE_META: build/release-current/meta.json
-        run: |
-          scripts/gen-meta.sh 2>&1 | tail -30
+          scripts/gen-meta.sh multilib 2>&1 | tail -30
 
       - name: Publish (clobber multilib asset only)
         shell: bash
