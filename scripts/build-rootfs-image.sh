@@ -108,7 +108,13 @@ docker run --platform "$PLATFORM" --name "$cname" -v "$PWD/$OUT:/out" "$IMAGE" b
   # exact URLs with their checksums. Nothing is downloaded yet.
   apt-get install -y --no-install-recommends --print-uris ${RUNTIME_PKGS[*]} > /out/rootfs-arm64.uris.txt
   # Then the same set for real - from the lock, so the tree matches the record.
-  apt-get install -y --no-install-recommends \$(grep '^http' /out/rootfs-arm64.uris.txt | cut -d\"'\" -f1)
+  # BUGFIX（extract-rootfs-repo CI 实录）：uris 行首是单引号（'http://...），
+  # 旧的 grep '^http' 永远空匹配 → apt 空参数静默成功 → 树只剩基底（78 包 vs 旧 325）。
+  # sed 按引号定界提取 URL；smoke 另有哨兵包断言兜底。
+  # BUGFIX: uris lines START with a quote ('http://...), so `grep '^http'` matched
+  # nothing and `apt-get install` succeeded vacuously — the tree kept only the base
+  # (78 packages vs 325 before). Extract quoted URLs with sed; smoke adds sentinels.
+  apt-get install -y --no-install-recommends \$(grep -o \"'http[^']*\" /out/rootfs-arm64.uris.txt | tr -d \"'\")
   apt-get clean
   rm -rf /var/lib/apt/lists/*
   # Private library dirs: Debian resolves e.g. libpulsecommon-17.0.so (in

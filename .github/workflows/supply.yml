@@ -1,18 +1,12 @@
-# Runtime 组件供给流水线（nixport-rootfs）。
-#
-# 单条流水线串行构建并组装全部 rootfs 内容（design D3 co-publish + 范围修订）：
-# Runtime 树（锁定 uris + base digest）→ sysroot-arm64 + x86_64 客机树 → glibc →
-# FEX → Mesa → assemble（组件合并 + shims → 成品 payload tars）→ pack → smoke
-# （chroot 存活 + qemu payload 自测）→ 发布滚动 release rootfs-latest。
-# multilib 客机树由独立流水线 multilib.yml 负责（手动触发，缺 32 位需求时不占时间）。并发由 concurrency 串行化，发布进行中 MUST NOT 产生混合资产状态
-# （spec runtime-supply-chain：滚动发布一致性）。
-#
-# 部分重建（nixport-drivers 同款）：workflow_dispatch 的 rebuild 选择器只 gates
-# 昂贵的编译段；Runtime 树与 x86_64 树每次都构建（pack 与 glibc 的 packages.txt
-# 依赖它们，且成本 ~20 分钟可接受）。被跳过的资产不由本次替换——发布前先取回
-# release 现存 meta.json 合并，release 整体保持完整。
-#
-# 发布前 MUST 通过 scripts/smoke-test.sh（spec：发布前自检）。
+# Runtime 供给流水线（nixport-rootfs）——单流水线构建并组装全部 rootfs 内容，
+# 按**渠道**发布到多个滚动 release（多渠道范围修订）：
+#   payload-latest   成品 payload + version/json + meta（app release 消费）
+#   sysroot-latest   交叉编译 sysroot arm64（Port 开发者；x86_64 为内部输入不外发）
+#   rootfs-latest    设备直装 zst + 锁定清单（手机/topup）
+# multilib 客机树由独立流水线 multilib.yml 负责（手动触发，发布 multilib-latest）。
+# 全量重建（组件部分重建已在多渠道拆分中移除——渠道自足，无需跨渠道补拉）。
+# 发布前两级自检 MUST 通过（spec runtime-supply-chain）：chroot 存活 + 哨兵包 +
+# qemu payload 自测。
 name: Runtime supply
 
 on:
@@ -28,16 +22,10 @@ on:
         description: 'Pin the Debian archive (YYYYMMDDTHHMMSSZ); empty = live archive'
         required: false
         default: ''
-      rebuild:
-        description: 'Which expensive stages to rebuild (trees always rebuild)'
-        required: true
-        default: 'all'
-        type: choice
-        options: [all, sysroots, glibc, fex, mesa, multilib]
-      tag:
-        description: 'Release tag to publish to (an existing one is replaced)'
+      tag_suffix:
+        description: 'Optional suffix for the release tags (empty = *-latest)'
         required: false
-        default: 'rootfs-latest'
+        default: ''
   push:
     branches: ['main']
     tags: ['v*']
@@ -46,10 +34,6 @@ on:
       - 'patches/**'
       - 'third_party/**'
       - '.github/workflows/supply.yml'
-# tags 触发语义：新 tag 的 push 把指向提交的全部文件计为变更，paths 不会拦截——
-# 打基线 tag（如 v0.1.0）即可全量重建并发布到滚动 release rootfs-latest
-# （TAG 默认值不受 tag 名影响；release 滚动，git tag 只作来源标记，meta.json
-# 的 built_from 记录精确 sha）。
 
 permissions:
   contents: write
@@ -65,8 +49,7 @@ jobs:
     env:
       SUITE: ${{ github.event.inputs.suite || 'trixie' }}
       SNAPSHOT: ${{ github.event.inputs.snapshot }}
-      REBUILD: ${{ github.event.inputs.rebuild || 'all' }}
-      TAG: ${{ github.event.inputs.tag || 'rootfs-latest' }}
+      SUFFIX: ${{ github.event.inputs.tag_suffix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,10 +65,9 @@ jobs:
           platforms: arm64
 
       - name: Host packages
+        # glslang-tools: Mesa 的 meson 需要 glslangValidator（首轮 CI 教训）。
         run: |
           sudo apt-get update -qq
-          # glslang-tools：Mesa 的 meson 找 glslangValidator（Vulkan 管线校验）。
-          # glslang-tools: Mesa's meson requires glslangValidator (Vulkan pipeline checks).
           sudo apt-get install -y -qq ninja-build ccache zstd pigz libarchive-tools \
             bison flex file glslang-tools >/dev/null
           sudo pip3 install --break-system-packages -q 'meson>=1.4' mako pyyaml packaging
@@ -94,123 +76,103 @@ jobs:
           for f in /usr/lib/llvm-22/bin/*; do sudo ln -sf "$f" /usr/local/bin/$(basename "$f"); done
           clang --version | head -1; meson --version
 
-      # --- 树类（每次都构建：pack 与 packages.txt 依赖它们） -------------------
+      # ---- 树类（每次都构建：组装与锁定清单依赖它们） -------------------------
       - name: Runtime tree (locked image)
-        # shell: bash => bash --noprofile --norc -eo pipefail：`script | tail` 的
-        # 失败退出码不被 tail 覆盖（rootfs-build-pipeline-repair 确立的约定）。
         shell: bash
         run: |
           scripts/build-rootfs-image.sh 2>&1 | tail -40
 
-      - name: sysroot-arm64 + x86_64 guest tree + sysroot-x86_64
-        # 三棵构建期树每次都构建（fex 的 packages 与 glibc 的 packages.txt 依赖它们；
-        # 首轮 CI 败于 sysroot-x86_64 缺席——need_artifact 指名诊断正确生效）。
-        # Both build-time trees always build: fex/glibc consume them. The first CI
-        # round failed on the missing sysroot-x86_64 — the need_artifact diagnostic
-        # correctly named it.
+      - name: sysroot-arm64 + x86_64 guest tree
         shell: bash
         run: |
           SYSROOT_ONLY=1 scripts/build-rootfs.sh 2>&1 | tail -40
           scripts/build-x86-sysroot.sh 2>&1 | tail -20
 
-      # --- 编译类（rebuild 选择器 gates） --------------------------------------
+      # ---- 组件编译（全量；失败即红） ------------------------------------------
       - name: glibc (patched)
         shell: bash
-        if: ${{ env.REBUILD == 'all' || env.REBUILD == 'glibc' }}
         run: |
           scripts/build-glibc.sh 2>&1 | tail -40
 
       - name: fex + thunks
         shell: bash
-        if: ${{ env.REBUILD == 'all' || env.REBUILD == 'fex' }}
         run: |
           scripts/build-fex.sh 2>&1 | tail -40
 
       - name: mesa turnip (KGSL)
         shell: bash
-        if: ${{ env.REBUILD == 'all' || env.REBUILD == 'mesa' }}
         run: |
           scripts/build-mesa.sh 2>&1 | tail -40
 
-      # --- 发布前：取回现存 meta（部分合并用）→ 打包 → 自检 → 元数据 -----------
-      # 部分重建语义的组装层：缺失的组件安装树从当前 release 补齐（rebuild 选择器
-      # 只重建命中的组件），保证每次组装出的成品 payload 都是最新组件的完整组合；
-      # 同时取回现存 meta.json（gen-meta 的 BASE_META 合并）。multilib 由独立
-      # 流水线（multilib.yml）负责，本流水线不再构建它。
-      - name: Fetch missing components + current meta
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          scripts/fetch-current-release.sh 2>&1 | tail -20
-
-      - name: Assemble payload (final tars + self-test binaries)
+      # ---- 组装 + 打包（渠道分目录） --------------------------------------------
+      - name: Assemble payload
         shell: bash
         run: |
           scripts/assemble-payload.sh 2>&1 | tail -40
 
-      - name: Pack
+      - name: Pack (per-channel staging)
         shell: bash
         run: |
           scripts/pack-release-assets.sh 2>&1 | tail -30
 
-      - name: Smoke test (must pass before publish)
+      - name: Smoke test (chroot + sentinels + payload qemu self-tests)
         shell: bash
         run: |
-          scripts/smoke-test.sh 2>&1 | tail -30
+          scripts/smoke-test.sh 2>&1 | tail -40
 
-      - name: Meta
+      - name: Meta (per channel)
         shell: bash
-        env:
-          BASE_META: build/release-current/meta.json
         run: |
-          scripts/gen-meta.sh 2>&1 | tail -60
+          scripts/gen-meta.sh payload
+          scripts/gen-meta.sh sysroot
+          scripts/gen-meta.sh rootfs
 
       - uses: actions/upload-artifact@v4
         with:
-          name: nixport-rootfs-release
+          name: nixport-rootfs-meta
           path: |
-            build/release/meta.json
-            build/release/payload.version
-            build/release/payload.json
-            build/release/*.tar.gz
-            build/release/*.tar.zst
-            build/release/*.sha256
-            build/release/rootfs-arm64.uris.txt
-            build/release/rootfs-arm64.base.txt
+            build/release/*/meta.json
+            build/release/payload/payload.version
+            build/release/payload/payload.json
+            build/release/rootfs/rootfs-arm64.packages.txt
           if-no-files-found: error
-          compression-level: 0
 
-      - name: Publish release "${{ env.TAG }}"
+      # ---- 渠道发布（各滚动 release，--clobber 只动本渠道资产） -----------------
+      - name: Publish payload-latest
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          TAG="payload-latest$SUFFIX"
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Nixport runtime components ($SUITE)" \
-              --notes "Debian trees, cross sysroots, patched glibc/FEX/Mesa, x86 multilib. Consumers: release builds, Port developers (sysroot), phone runtime (multilib). See meta.json for the contract."
-          # --clobber 只覆盖本次重建的资产；未重建的资产保留在 release 上（部分重建
-          # 语义），release 整体保持完整。
-          gh release upload "$TAG" --clobber \
-            build/release/meta.json \
-            build/release/payload.version \
-            build/release/payload.json \
-            build/release/*.tar.gz \
-            build/release/*.tar.zst \
-            build/release/*.sha256 \
-            build/release/rootfs-arm64.uris.txt \
-            build/release/rootfs-arm64.base.txt
-          {
-            echo "**Runtime components** ($SUITE) built from \`${GITHUB_SHA:0:7}\` on $(date -u +%Y-%m-%d)."
-            echo
-            echo "Contract: \`meta.json\` (fx_package / fxd_root / fxd_ldso / libc6 / per-asset sha256)."
-            echo "Verify: \`sha256sum -c '*.sha256'\` after downloading."
-            echo
-            echo "Cross-compiling a Port against the arm64 sysroot:"
-            echo '```bash'
-            echo 'tar -C ~/nixport-sysroot -xzf sysroot-arm64.tar.gz'
-            echo 'clang --target=aarch64-linux-gnu --sysroot=~/nixport-sysroot/sysroot-arm64 ...'
-            echo '```'
-          } > notes.md
-          gh release edit "$TAG" --title "Nixport runtime components ($SUITE) ${GITHUB_SHA:0:7}" --notes-file notes.md
+              --title "Nixport payload (assembled, self-tested)" \
+              --notes "Assembled payload tars + payload.version/json. Contract: meta.json. Consumer: the app release (scripts/fetch-payload.sh)."
+          gh release upload "$TAG" --clobber build/release/payload/*
+          gh release edit "$TAG" --title "Nixport payload ($SUITE) ${GITHUB_SHA:0:7}"
+
+      - name: Publish sysroot-latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="sysroot-latest$SUFFIX"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nixport cross sysroot (arm64)" \
+              --notes "Cross-compile sysroot for Port developers. Usage: my-docs/移植规范/Port打包规范.md"
+          gh release upload "$TAG" --clobber build/release/sysroot/*
+          gh release edit "$TAG" --title "Nixport sysroot (libc6: $(grep -m1 '^libc6 ' build/rootfs/rootfs-arm64.packages.txt | awk '{print $2}'))"
+
+      - name: Publish rootfs-latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="rootfs-latest$SUFFIX"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nixport runtime rootfs (device-direct)" \
+              --notes "Device-direct runtime pack (.tar.zst) + lock lists (uris/base/packages, consumed by nxp-rootfs-topup.sh)."
+          gh release upload "$TAG" --clobber build/release/rootfs/*
+          gh release edit "$TAG" --title "Nixport device rootfs ($SUITE) ${GITHUB_SHA:0:7}"

@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 60
     env:
       SNAPSHOT: ${{ github.event.inputs.snapshot }}
-      TAG: rootfs-latest
+      TAG: multilib-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -47,14 +47,13 @@ jobs:
         run: |
           scripts/build-rootfs-x86-multilib.sh 2>&1 | tail -20
 
-      - name: Pack multilib asset
+      - name: Pack multilib channel
         run: |
-          mkdir -p build/release
+          mkdir -p build/release/multilib
           # gzip 而非 zstd：X86Rootfs.kt 用 Android 原生 gzip 解压（java.util.zip）。
-          zstd -dc build/rootfs/rootfs-x86-multilib.tar.zst | pigz -9 > build/release/rootfs-x86-multilib.tar.gz
-          ( cd build/release && sha256sum rootfs-x86-multilib.tar.gz > rootfs-x86-multilib.tar.gz.sha256 )
-          cp build/rootfs/rootfs-x86-multilib.packages.txt build/release/
-          ls -la build/release
+          zstd -dc build/rootfs/rootfs-x86-multilib.tar.zst | pigz -9             > build/release/multilib/rootfs-x86-multilib.tar.gz
+          cp build/rootfs/rootfs-x86-multilib.packages.txt build/release/multilib/
+          ls -la build/release/multilib
 
       # meta 合并：取现存 meta，更新 multilib 条目，其余保留（部分重建语义）。
       - name: Fetch current meta
@@ -81,10 +80,8 @@ jobs:
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Nixport runtime components" --notes "See meta.json for the contract."
+              --title "Nixport x86 multilib rootfs" \
+              --notes "Debian amd64+i386 guest tree for 32-bit x86 programs. Installed by the app at runtime (X86Rootfs.kt). Contract: meta.json."
           gh release upload "$TAG" --clobber \
-            build/release/rootfs-x86-multilib.tar.gz \
-            build/release/rootfs-x86-multilib.tar.gz.sha256 \
-            build/release/rootfs-x86-multilib.packages.txt \
-            build/release/meta.json
+            build/release/multilib/*
           echo "published rootfs-x86-multilib.tar.gz to $TAG"

@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/config.sh
 
-REL=build/release
+REL=build/release  # 渠道目录：payload/ sysroot/ rootfs/
 UNPACK=build/release-smoke
 # 部分重建语义：只自检本次打包出的资产；缺失的资产由 release 上旧资产覆盖
 # （完整性由 gen-meta.sh 的合并保证）。
@@ -56,6 +56,16 @@ docker run --rm --platform linux/arm64 -v "$TREE:/smoke-root" \
     test -s /smoke-root/etc/ld.so.cache
   ' >/dev/null || fail "runtime tree cannot run bash / ldconfig in chroot"
 pass "runtime tree alive (bash + ldconfig in chroot)"
+# 哨兵包断言（uris 锁定安装 bug 的兜底）：清单是生命线，抽 4 个必在的代表包 +
+# 总包数下限。基底只有 ~78 包，完整 Runtime ≥ 300。
+# Sentinel packages (the uris-lock bug's safety net): spot-check 4 representative
+# packages + a total floor. Base alone is ~78; a full Runtime is ≥ 300.
+NP="$(grep -c '^Package:' "$UNPACK/tree/var/lib/dpkg/status")"
+[[ "$NP" -ge 250 ]] || fail "runtime tree has only $NP packages (manifest install broke again?)"
+for s in python3.13 xvfb fonts-noto-cjk libgbm1; do
+  grep -q "^Package: $s\$" "$UNPACK/tree/var/lib/dpkg/status" || fail "sentinel package missing: $s"
+done
+pass "package manifest sane ($NP packages, sentinels present)"
 else
 skip "runtime tree"
 fi
@@ -114,9 +124,9 @@ if [[ -f "$REL/rootfs-x86_64.tar.gz" ]]; then
 else
   skip "x86_64 guest tree"
 fi
-if [[ -f "$REL/rootfs-arm64.tar.zst" ]]; then
-  zstd -q -t "$REL/rootfs-arm64.tar.zst" || fail "device pack rootfs-arm64.tar.zst is corrupt"
-  [[ -s "$REL/rootfs-arm64.uris.txt" ]] || fail "missing lock list rootfs-arm64.uris.txt"
+if [[ -f "$REL/rootfs/rootfs-arm64.tar.zst" ]]; then
+  zstd -q -t "$REL/rootfs/rootfs-arm64.tar.zst" || fail "device pack rootfs-arm64.tar.zst is corrupt"
+  [[ -s "$REL/rootfs/rootfs-arm64.uris.txt" ]] || fail "missing lock list rootfs-arm64.uris.txt"
   pass "device pack + lock list"
 else
   skip "device pack"
