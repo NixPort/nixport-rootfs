@@ -99,10 +99,16 @@ jobs:
         run: |
           scripts/build-rootfs-image.sh 2>&1 | tail -40
 
-      - name: sysroot-arm64 + x86_64 guest tree
+      - name: sysroot-arm64 + x86_64 guest tree + sysroot-x86_64
+        # 三棵构建期树每次都构建（fex 的 packages 与 glibc 的 packages.txt 依赖它们；
+        # 首轮 CI 败于 sysroot-x86_64 缺席——need_artifact 指名诊断正确生效）。
+        # Both build-time trees always build: fex/glibc consume them. The first CI
+        # round failed on the missing sysroot-x86_64 — the need_artifact diagnostic
+        # correctly named it.
         shell: bash
         run: |
           SYSROOT_ONLY=1 scripts/build-rootfs.sh 2>&1 | tail -40
+          scripts/build-x86-sysroot.sh 2>&1 | tail -20
 
       # --- 编译类（rebuild 选择器 gates） --------------------------------------
       - name: glibc (patched)
