@@ -1,0 +1,2 @@
+# Second pad (slot 1): BTN_B held, then released by the host closing.
+1:0x131:1 0:0:0

@@ -1,0 +1,90 @@
+# x86 multilib 客机树（amd64 + i386）独立流水线。
+#
+# multilib 只服务 32 位 x86 程序（X86Rootfs.kt 运行时下载安装）。当前没有 32 位
+# 需求，主管线（supply.yml）不再构建它——需要时在这里手动触发，产物直接发布到
+# 同一个滚动 release rootfs-latest（--clobber 只替换 multilib 资产，meta 合并），
+# app 与主管线均无感知。
+#
+# The x86 multilib guest tree serves 32-bit x86 programs only (runtime download by
+# X86Rootfs.kt). No current 32-bit demand, so the main supply pipeline no longer
+# builds it — trigger here on demand; the asset publishes to the same rolling
+# release rootfs-latest (clobber replaces only the multilib asset, meta merged).
+name: x86 multilib rootfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot:
+        description: 'Pin the Debian archive (YYYYMMDDTHHMMSSZ); empty = live archive'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: multilib-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  multilib:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SNAPSHOT: ${{ github.event.inputs.snapshot }}
+      TAG: rootfs-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # amd64 容器在 runner 上原生运行，无需 qemu/binfmt。
+      # amd64 containers run natively on the runner — no qemu/binfmt needed.
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd pigz >/dev/null
+
+      - name: Build multilib tree
+        run: |
+          scripts/build-rootfs-x86-multilib.sh 2>&1 | tail -20
+
+      - name: Pack multilib asset
+        run: |
+          mkdir -p build/release
+          # gzip 而非 zstd：X86Rootfs.kt 用 Android 原生 gzip 解压（java.util.zip）。
+          zstd -dc build/rootfs/rootfs-x86-multilib.tar.zst | pigz -9 > build/release/rootfs-x86-multilib.tar.gz
+          ( cd build/release && sha256sum rootfs-x86-multilib.tar.gz > rootfs-x86-multilib.tar.gz.sha256 )
+          cp build/rootfs/rootfs-x86-multilib.packages.txt build/release/
+          ls -la build/release
+
+      # meta 合并：取现存 meta，更新 multilib 条目，其余保留（部分重建语义）。
+      - name: Fetch current meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/release-current
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p meta.json -O build/release-current/meta.json 2>/dev/null \
+            || echo "no existing release meta (first run?)"
+
+      - name: Meta
+        shell: bash
+        env:
+          BASE_META: build/release-current/meta.json
+        run: |
+          scripts/gen-meta.sh 2>&1 | tail -30
+
+      - name: Publish (clobber multilib asset only)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nixport runtime components" --notes "See meta.json for the contract."
+          gh release upload "$TAG" --clobber \
+            build/release/rootfs-x86-multilib.tar.gz \
+            build/release/rootfs-x86-multilib.tar.gz.sha256 \
+            build/release/rootfs-x86-multilib.packages.txt \
+            build/release/meta.json
+          echo "published rootfs-x86-multilib.tar.gz to $TAG"

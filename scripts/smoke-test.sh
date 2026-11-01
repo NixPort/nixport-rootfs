@@ -87,6 +87,22 @@ else
   skip "mesa install"
 fi
 
+echo ">> 2.5/3 成品 payload 自测（qemu：seccomp-wrap / shmtest，spec 发布前自检）"
+# assemble-payload.sh 以 KEEP_STAGE=1 留下的暂存树就是发布内容的原样 —— 在这里
+# 用 qemu 把运行时自测跑掉，app release 链因此不再需要 docker/qemu。
+# The staging tree assemble-payload.sh leaves (KEEP_STAGE=1) IS the publish
+# content — run the runtime self-tests here under qemu so the app release chain
+# never needs docker/qemu.
+if [[ -d build/payload-stage/arm64 ]]; then
+  scripts/test-payload-qemu.sh "/data/data/$FXD_PACKAGE/files/rootfs/opt/fexdroid-tests/seccomp-wrap" 2>&1 | tail -5 \
+    || fail "payload self-test failed: seccomp-wrap"
+  scripts/test-payload-qemu.sh "/data/data/$FXD_PACKAGE/files/rootfs/opt/fexdroid-tests/shmtest all" 2>&1 | tail -5 \
+    || fail "payload self-test failed: shmtest"
+  pass "payload qemu self-tests (seccomp-wrap + shmtest)"
+else
+  skip "payload self-tests（本次未组装 / assembly not run this time）"
+fi
+
 echo ">> 3/3 其余资产结构"
 if [[ -d build/rootfs/sysroot-arm64/usr/include ]]; then pass "sysroot-arm64 include"; else skip "sysroot-arm64"; fi
 if [[ -d build/rootfs/sysroot-x86_64/usr/include ]]; then pass "sysroot-x86_64 include"; else skip "sysroot-x86_64"; fi

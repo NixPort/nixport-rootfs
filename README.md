@@ -18,13 +18,15 @@ x86 multilib）、交叉编译 sysroot（arm64/amd64）、补丁版 glibc / FEX 
 
 | 资产 | 消费方 | 解包到 |
 |---|---|---|
-| `rootfs-arm64.tar.gz` | app release 组装 | `build/rootfs/rootfs-arm64.tar` |
-| `rootfs-x86_64.tar.gz` | app release 组装 | `build/rootfs/rootfs-x86_64.tar` |
-| `sysroot-arm64.tar.gz` | app 组装 + **Port 开发者交叉编译** | `build/rootfs/sysroot-arm64/` |
-| `sysroot-x86_64.tar.gz` | app 组装（FEX thunks 构建期输入） | `build/rootfs/sysroot-x86_64/` |
-| `glibc/fex/mesa-install.tar.gz` | app release 组装 | `build/<组件>/install/` |
-| `rootfs-x86-multilib.tar.gz` | **手机端运行时下载**（X86Rootfs.kt） | app 内安装 |
+| `payload-arm64.tar.gz` / `payload-x86_64.tar.gz` | **app release（成品，组装+自测完）** | `build/payload-rootfs/rootfs-*.tar` |
+| `payload.version` / `payload.json` | app（随 APK assets 分发） | `build/payload/assets/` |
+| `sysroot-arm64.tar.gz` | **Port 开发者交叉编译** + shim 调试 | `build/rootfs/sysroot-arm64/` |
+| `sysroot-x86_64.tar.gz` | FEX thunks 构建期输入 | `build/rootfs/sysroot-x86_64/` |
+| `rootfs-x86-multilib.tar.gz` | **手机端运行时下载**（X86Rootfs.kt，32 位 x86） | app 内安装 |
 | `rootfs-arm64.tar.zst` (+uris/base) | 设备直装 / `nxp-rootfs-topup.sh` | 手机 |
+
+组件中间产物（裸 Debian 树、组件安装树）不外发——它们是 `assemble-payload.sh` 的
+内部输入。`multilib` 由独立流水线 `multilib.yml` 手动触发（无 32 位需求时不占构建时间）。
 
 ## 构建（流水线）
 
@@ -34,16 +36,17 @@ SYSROOT_ONLY=1 scripts/build-rootfs.sh   # sysroot-arm64 + x86_64 客机树
 scripts/build-glibc.sh                   # 补丁版 glibc（源版本自动取 packages.txt 的 libc6）
 scripts/build-fex.sh                     # FEX + thunks
 scripts/build-mesa.sh                    # Mesa Turnip (KGSL)
-scripts/build-rootfs-x86-multilib.sh     # x86 multilib 客机树
+scripts/assemble-payload.sh              # 组装成品 payload（组件合并+shims+fix-elf+ldconfig）
 scripts/pack-release-assets.sh           # → build/release/（逐资产 .sha256）
-scripts/smoke-test.sh                    # 发布前自检（失败 MUST NOT 发布）
+scripts/smoke-test.sh                    # 发布前自检：chroot 存活 + qemu payload 自测
 scripts/gen-meta.sh                      # → build/release/meta.json
 ```
 
 CI 触发：`paths`（scripts/patches/third_party）push 全量重建；
 `workflow_dispatch` 可选 `SUITE`（trixie/sid）、`SNAPSHOT`（Debian 快照 pin）、
-`rebuild` 选择器（glibc/fex/mesa/sysroots/multilib 单独重建——跳过的资产保留
-release 上旧版，meta 合并）。`concurrency` 串行化消灭 clobber 竞态。
+`rebuild` 选择器（glibc/fex/mesa/sysroots 单独重建——跳过的组件从当前 release
+补齐后再组装，成品 payload 始终是最新组件的完整组合）。`concurrency` 串行化消灭
+clobber 竞态。multilib 走独立的 `multilib.yml`（仅手动触发）。
 
 ## 改组件补丁怎么调试（不触 CI、不触 Gradle）
 
