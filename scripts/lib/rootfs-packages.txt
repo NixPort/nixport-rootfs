@@ -28,6 +28,11 @@ libxcb-sync1
 libxcb-xfixes0
 libxcb-randr0
 libxshmfence1
+# 键盘映射（X11 后端运行时 dlopen；SpartanPort 的 Rust 启动器/winit 需要，
+# 2026-11-01）：libxkbcommon0 原先靠传递依赖进来的，现在显式声明。
+libxkbcommon0
+libxkbcommon-x11-0
+libxcb-xkb1
 libwayland-client0
 libvulkan1
 vulkan-tools
