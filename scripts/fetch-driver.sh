@@ -49,12 +49,12 @@ ICD="$(find "$WORK" -path '*vulkan/icd.d*' -name '*.json' | head -1)"
 # 落位到 assemble 消费的 mesa/install 布局（与 build-mesa.sh 产物同形）
 DEST="build/mesa/install$FXD_ROOT"
 rm -rf build/mesa/install
-mkdir -p "$DEST/usr/lib/$FXD_MULTIARCH" "$DEST$FXD_ROOT/usr/share/vulkan/icd.d"
+mkdir -p "$DEST/usr/lib/$FXD_MULTIARCH" "$DEST/usr/share/vulkan/icd.d"
 cp "$SO" "$DEST/usr/lib/$FXD_MULTIARCH/"
-cp "$ICD" "$DEST$FXD_ROOT/usr/share/vulkan/icd.d/"
+cp "$ICD" "$DEST/usr/share/vulkan/icd.d/"
 # 单一 ICD 不变式：icd.d 内必须恰好一个 manifest（多驱动走中性目录 + 会话 env，
 # 这是 Vulkan loader 语义坑的防线）。
-N="$(ls "$DEST$FXD_ROOT/usr/share/vulkan/icd.d"/*.json 2>/dev/null | wc -l)"
+N="$(ls "$DEST/usr/share/vulkan/icd.d"/*.json 2>/dev/null | wc -l)"
 [[ "$N" -eq 1 ]] || fail "icd.d must contain exactly 1 json, got $N"
 
 # ICD library_path 规范化：fragment 的前缀由 drivers 侧拼装（实测出现过
@@ -63,7 +63,7 @@ N="$(ls "$DEST$FXD_ROOT/usr/share/vulkan/icd.d"/*.json 2>/dev/null | wc -l)"
 # Normalize ICD library_path: the drivers side assembles its own prefix (a
 # doubled /usr/usr was observed). Rewrite to the actual placed path.
 LIBN="$(basename "$SO")"
-python3 - "$DEST$FXD_ROOT/usr/share/vulkan/icd.d/" "$FXD_ROOT/usr/lib/$FXD_MULTIARCH/$LIBN" <<'PY'
+python3 - "$DEST/usr/share/vulkan/icd.d/" "$FXD_ROOT/usr/lib/$FXD_MULTIARCH/$LIBN" <<'PY'
 import json, sys, pathlib
 icd_dir, want = pathlib.Path(sys.argv[1]), sys.argv[2]
 for f in icd_dir.glob("*.json"):
@@ -76,7 +76,7 @@ PY
 # 结构自检：ELF aarch64 + ICD 里能找到 freedreno 字样
 file "$DEST/usr/lib/$FXD_MULTIARCH/libvulkan_freedreno.so" | grep -q "ARM aarch64" \
   || fail "driver .so is not aarch64"
-grep -q freedreno "$DEST$FXD_ROOT/usr/share/vulkan/icd.d/"*.json || fail "ICD json lacks freedreno entry"
+grep -q freedreno "$DEST/usr/share/vulkan/icd.d/"*.json || fail "ICD json lacks freedreno entry"
 
 rm -rf "$DL"
 echo ">> 默认驱动就绪：build/mesa/install（${REPO}@${DRIVER_TAG} $DRIVER_ASSET，variant=$DRIVER_VARIANT）"
