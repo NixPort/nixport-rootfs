@@ -114,6 +114,13 @@ echo ">> trimming"
 mv "$OUT/stage/packages.txt" "$OUT/rootfs-arm64.packages.txt"
 # reference client, part of the Runtime so every Port can call the host.
 install -D -m 0755 scripts/nxp-port "$OUT/stage/usr/local/bin/nxp-port"
+# AppImage 的静态 runtime（导入期解包的第一级途径）：非 Debian 包，由
+# scripts/fetch-uruntime.sh 拉取校验后装进来。
+# The static AppImage runtime (extraction route ①): not a Debian package, so it
+# is fetched and checksum-verified by scripts/fetch-uruntime.sh.
+source scripts/lib/need-artifact.sh
+need_artifact build/uruntime/uruntime scripts/fetch-uruntime.sh
+install -D -m 0755 build/uruntime/uruntime "$OUT/stage/usr/local/bin/uruntime"
 echo ">> packing arm64 runtime tree"
 tar -C "$OUT/stage" --numeric-owner --owner=0 --group=0 -cf "$OUT/rootfs-arm64.tar" .
 rm -rf "$OUT/stage" "$OUT/rootfs-arm64-raw.tar"

@@ -56,15 +56,20 @@ docker run --rm --platform linux/arm64 -v "$TREE:/smoke-root" \
     test -s /smoke-root/etc/ld.so.cache
   ' >/dev/null || fail "runtime tree cannot run bash / ldconfig in chroot"
 pass "runtime tree alive (bash + ldconfig in chroot)"
-# 哨兵包断言（uris 锁定安装 bug 的兜底）：清单是生命线，抽 4 个必在的代表包 +
+# 哨兵包断言（uris 锁定安装 bug 的兜底）：清单是生命线，抽 5 个必在的代表包 +
 # 总包数下限。基底只有 ~78 包，完整 Runtime ≥ 300。
-# Sentinel packages (the uris-lock bug's safety net): spot-check 4 representative
+# Sentinel packages (the uris-lock bug's safety net): spot-check 5 representative
 # packages + a total floor. Base alone is ~78; a full Runtime is ≥ 300.
 NP="$(grep -c '^Package:' "$UNPACK/tree/var/lib/dpkg/status")"
 [[ "$NP" -ge 250 ]] || fail "runtime tree has only $NP packages (manifest install broke again?)"
-for s in python3.13 xvfb fonts-noto-cjk libgbm1; do
+for s in python3.13 xvfb fonts-noto-cjk libgbm1 squashfs-tools; do
   grep -q "^Package: $s\$" "$UNPACK/tree/var/lib/dpkg/status" || fail "sentinel package missing: $s"
 done
+# AppImage 的静态 runtime（导入期解包的第一级途径）必须在树里：它不进包表，
+# 靠 fetch-uruntime.sh 装进来，漏了不会有 dpkg 记录可查。
+# The static AppImage runtime (extraction route ①) must be in the tree: it does
+# not ride the package list, so a missing one leaves no dpkg trace.
+[[ -x "$UNPACK/tree/usr/local/bin/uruntime" ]] || fail "rootfs tree lacks /usr/local/bin/uruntime"
 pass "package manifest sane ($NP packages, sentinels present)"
 else
 skip "runtime tree"

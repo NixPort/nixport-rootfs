@@ -56,6 +56,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq zstd pigz >/dev/null
 
+      - name: Fetch uruntime (AppImage runtime, pinned)
+        # uruntime 不是 Debian 包（进不了包表），是单独 pin 的拉取：版本与
+        # sha256 在 scripts/uruntime-pin.env。装进 rootfs 的 /usr/local/bin/，
+        # 供 app 侧导入期解 AppImage 的第一级途径。
+        # uruntime is not a Debian package (it cannot ride the package list), so
+        # it is a separate pinned fetch: version + sha256 in
+        # scripts/uruntime-pin.env. It lands in the rootfs's /usr/local/bin/ for
+        # the app's first extraction route.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/fetch-uruntime.sh 2>&1 | tail -10
+
       - name: Runtime tree (locked image)
         shell: bash
         run: |

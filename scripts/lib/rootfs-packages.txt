@@ -24,6 +24,10 @@
 # libxrender1) is the full Tkinter guest dependency set (SpartanPort's launcher):
 # the `_tkinter` C module must match python3.13 exactly, so the whole group goes in
 # together rather than picked one by one.
+#
+# squashfs-tools（表尾）：AppImage 导入期的解包工具（unsquashfs，多算法 gzip / xz /
+# lz4 / zstd）。AppImage 的解压在客人侧做（app 仓的 Imports.kt 三级兜底的第三级），
+# APK 不再自带解压器 —— 这条依赖因此落在 rootfs 里，随包表进树。
 
 dash
 coreutils
@@ -115,3 +119,4 @@ libtk8.6
 libtcl8.6
 libxft2
 libxrender1
+squashfs-tools

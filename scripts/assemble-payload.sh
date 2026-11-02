@@ -6,8 +6,8 @@
 #   build/payload/assets/payload.version|payload.json   content hash + path manifest
 #   build/payload-rootfs/rootfs-arm64.tar               the assembled runtime tree
 #   build/payload-rootfs/rootfs-x86_64.tar              the assembled x86_64 guest tree
-# APK-side jniLibs (libfxprobe / libunsquashfs) are NOT built here — they belong to the
-# app repo (build-jnilibs.sh), which downloads THIS script's products.
+# APK-side jniLibs (libfxprobe) are NOT built here — they belong to the app repo
+# (build-jnilibs.sh), which downloads THIS script's products.
 # app 仓库（fetch-payload.sh + build-jnilibs.sh）消费本脚本产物；本脚本不产 jniLibs。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -59,10 +59,13 @@ TREE_X86="$(tree_src x86_64)"
 need "build/glibc/install$FXD_LDSO" "base.yml (base-latest) via scripts/fetch-base.sh glibc.tar.gz"
 need "build/fex/install$FXD_ROOT/usr/bin/FEX" "scripts/build-fex.sh"
 
-# jniLibs（libfxprobe / libunsquashfs）归 app 仓库 build-jnilibs.sh：它们随 APK 分发、
-# 从 nativeLibraryDir 加载，不进 rootfs。
-# jniLibs (libfxprobe / libunsquashfs) belong to the app repo's build-jnilibs.sh: they
-# ship with the APK and load from nativeLibraryDir — never into the rootfs.
+# jniLibs（libfxprobe）归 app 仓库 build-jnilibs.sh：它们随 APK 分发、
+# 从 nativeLibraryDir 加载，不进 rootfs。AppImage 的解压器也不再是 APK 侧产物——
+# 解包在客人侧做，工具随 rootfs 走（squashfs-tools / uruntime）。
+# jniLibs (libfxprobe) belong to the app repo's build-jnilibs.sh: they ship with
+# the APK and load from nativeLibraryDir — never into the rootfs. The AppImage
+# extractor is not an APK-side artifact either: extraction happens on the guest,
+# and its tools ride the rootfs (squashfs-tools / uruntime).
 
 # ---- arm64 rootfs ------------------------------------------------------------------
 A="$STAGE/arm64"
