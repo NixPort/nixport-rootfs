@@ -33,6 +33,7 @@ libxshmfence1
 libxkbcommon0
 libxkbcommon-x11-0
 libxcb-xkb1
+xkb-data
 libwayland-client0
 libvulkan1
 vulkan-tools
