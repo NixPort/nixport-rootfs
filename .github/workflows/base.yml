@@ -73,6 +73,21 @@ jobs:
         run: |
           scripts/build-rootfs-image.sh 2>&1 | tail -30
 
+      - name: glibc (patched)
+        # glibc 归位原料层（extract-rootfs-repo 拆分补完）：补丁版 glibc 是"树的一部分"，
+        # 与树同源（packages.txt 契约）同 run 产出。rootfs-latest 直装包与 payload 的树
+        # 内容从此一致；sysroot 刻意保持纯 Debian（交叉编译视图不受补丁影响）。
+        # glibc belongs to the base layer: same source as the tree (packages.txt
+        # contract), same run. sysroot stays stock Debian on purpose.
+        shell: bash
+        run: |
+          scripts/build-glibc.sh 2>&1 | tail -30
+
+      - name: Overlay patched glibc into the runtime tree
+        shell: bash
+        run: |
+          scripts/overlay-glibc.sh 2>&1 | tail -5
+
       - name: sysroot-arm64 + x86_64 guest tree + sysroot-x86_64
         shell: bash
         run: |
@@ -93,6 +108,9 @@ jobs:
           [[ "$NP" -ge 250 ]] || { echo "BASE FAIL: runtime tree has only $NP packages (manifest install broke?)" >&2; exit 1; }
           ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - rootfs-arm64.tar | pigz -9 ) \
             > build/release/rootfs-arm64.tar.gz
+          # glibc DESTDIR 树（顶层目录 glibc/），supply 拉取后挪到 build/glibc
+          ( cd build && tar --sort=name --owner=0 --group=0 -cf - glibc | pigz -9 ) \
+            > build/release/glibc.tar.gz
           ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - sysroot-arm64 | pigz -9 ) \
             > build/release/sysroot-arm64.tar.gz
           ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - sysroot-x86_64 | pigz -9 ) \
@@ -101,7 +119,7 @@ jobs:
             > build/release/rootfs-x86_64.tar.gz
           # 契约文件随发：packages.txt 的 libc6 是全体系的 ABI 基线记录
           cp build/rootfs/rootfs-arm64.packages.txt build/release/
-          for f in rootfs-arm64.tar.gz sysroot-arm64.tar.gz sysroot-x86_64.tar.gz rootfs-x86_64.tar.gz; do
+          for f in rootfs-arm64.tar.gz sysroot-arm64.tar.gz sysroot-x86_64.tar.gz rootfs-x86_64.tar.gz glibc.tar.gz; do
             ( cd build/release && sha256sum "$f" > "$f.sha256" )
           done
           echo "runtime tree packages: $NP"
@@ -118,6 +136,7 @@ jobs:
               --notes "Raw materials consumed by fex.yml / supply.yml / Port developers (sysroot-arm64). Contract: rootfs-arm64.packages.txt (libc6 version is the ABI baseline)."
           gh release upload base-latest --clobber \
             build/release/rootfs-arm64.tar.gz \
+          build/release/glibc.tar.gz \
             build/release/sysroot-arm64.tar.gz \
             build/release/sysroot-x86_64.tar.gz \
             build/release/rootfs-x86_64.tar.gz \

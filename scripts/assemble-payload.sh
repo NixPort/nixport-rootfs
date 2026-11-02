@@ -56,7 +56,7 @@ tree_src() { # $1 = arm64|x86_64 -> echoes the tree directory
 }
 TREE_ARM64="$(tree_src arm64)"
 TREE_X86="$(tree_src x86_64)"
-need "build/glibc/install$FXD_LDSO" "scripts/build-glibc.sh"
+need "build/glibc/install$FXD_LDSO" "base.yml (base-latest) via scripts/fetch-base.sh glibc.tar.gz"
 need "build/fex/install$FXD_ROOT/usr/bin/FEX" "scripts/build-fex.sh"
 
 # jniLibs（libfxprobe / libunsquashfs）归 app 仓库 build-jnilibs.sh：它们随 APK 分发、

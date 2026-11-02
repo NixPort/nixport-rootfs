@@ -98,13 +98,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/fetch-base.sh rootfs-arm64.tar.gz sysroot-arm64.tar.gz rootfs-arm64.packages.txt 2>&1 | tail -20
+          scripts/fetch-base.sh rootfs-arm64.tar.gz rootfs-x86_64.tar.gz sysroot-arm64.tar.gz rootfs-arm64.packages.txt 2>&1 | tail -20
 
       # ---- 组件编译（全量；失败即红） ------------------------------------------
-      - name: glibc (patched)
+      - name: Fetch glibc (base-latest)
+        # glibc 归位 base.yml（与树同源同 run）：这里只拉取，不再编译。
+        # fetch-base.sh 解包到 build/rootfs/glibc（顶层目录），挪到 assemble 期望的
+        # build/glibc 位置。缺上游资产时 fail-fast，无本地重建回退（design D5）。
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/build-glibc.sh 2>&1 | tail -40
+          scripts/fetch-base.sh glibc.tar.gz 2>&1 | tail -5
+          rm -rf build/glibc && mv build/rootfs/glibc build/glibc
+          source scripts/config.sh
+          [[ -e "build/glibc/install$FXD_LDSO" ]] || { echo "glibc fetch failed: install$FXD_LDSO missing" >&2; exit 1; }
 
       - name: Fetch fex (fex-latest release)
         # 范围修订：FEX 构建剥离至 fex.yml。拉取 + 契约校验（fx_package 一致 +
