@@ -16,7 +16,8 @@
 #   - the packages are locked: apt resolves them once, the exact URLs with their
 #     checksums are written out (rootfs-arm64.uris.txt), and the tree is then
 #     built from exactly those bytes. A later build repeats it, and a phone can
-#     top up its rootfs from the same list (scripts/nxp-rootfs-topup.sh).
+#     (The consumer script nxp-rootfs-topup.sh was removed 2026-11-02;
+#     the uris list remains as the reproducibility record.)
 #
 # SUITE picks the Debian release the tree is built from:
 #   SUITE=trixie  (default) Debian 13: glibc 2.41 - the stable base, and what
@@ -115,10 +116,10 @@ docker run --platform "$PLATFORM" --name "$cname" -v "$PWD/$OUT:/out" "$IMAGE" b
   # nothing and `apt-get install` succeeded vacuously — the tree kept only the base
   # (78 packages vs 325 before). Extract quoted URLs with sed; smoke adds sentinels.
   # 安装直接走包清单（与 build-rootfs.sh 同款、久经验证的路径）；uris.txt 仅作
-  # 记录（nxp-rootfs-topup.sh 消费）。URL 锁定安装已被证伪：uris 行首引号 + apt
+  # 记录（原消费脚本 nxp-rootfs-topup.sh 已删除 2026-11-02）。URL 锁定安装已被证伪：uris 行首引号 + apt
   # 的 URL 参数解析三层引号纠缠（grep '^http' 空匹配 → 树只剩基底 78 包）。
   # Install directly from the package list (same proven path as build-rootfs.sh);
-  # uris.txt stays as a RECORD (consumed by nxp-rootfs-topup.sh). The URL-lock
+  # uris.txt stays as a RECORD (its consumer script was removed 2026-11-02). The URL-lock
   # install is disproven: three layers of quoting around quoted URL lines broke
   # silently (tree was base-only, 78 packages).
   apt-get install -y --no-install-recommends ${RUNTIME_PKGS[*]} >/dev/null
