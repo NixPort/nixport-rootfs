@@ -33,7 +33,6 @@ on:
       # 显式白名单：patches/fex 只触发 fex.yml、patches/mesa 已退役（驱动改拉
       # nixport-drivers），避免"fex 正在覆盖 release、supply 正在下载"的竞态窗口。
       - 'scripts/build-rootfs.sh'
-      - 'scripts/build-rootfs-image.sh'
       - 'scripts/build-glibc.sh'
       - 'scripts/assemble-payload.sh'
       - 'scripts/pack-release-assets.sh'

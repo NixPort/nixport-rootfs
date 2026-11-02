@@ -22,7 +22,7 @@ source scripts/lib/need-artifact.sh
 
 REL=build/release
 rm -rf "$REL"
-mkdir -p "$REL/payload" "$REL/sysroot" "$REL/rootfs"
+mkdir -p "$REL/payload" "$REL/sysroot"
 skip() { echo ">> skip: $1（输入缺失，本渠道本次无产出 / input missing, channel empty this run）"; }
 sha() { ( cd "$REL/$2" && sha256sum "$1" > "$1.sha256" ); }
 
@@ -48,18 +48,7 @@ else
   skip "sysroot 渠道（build-rootfs.sh）"
 fi
 
-echo ">> rootfs 渠道：设备直装包 + 锁定清单"
-if [[ -f build/rootfs/rootfs-arm64.tar ]]; then
-  zstd -q -19 -T0 -f build/rootfs/rootfs-arm64.tar -o "$REL/rootfs/rootfs-arm64.tar.zst"
-  for f in rootfs-arm64.uris.txt rootfs-arm64.base.txt rootfs-arm64.packages.txt; do
-    need_artifact "build/rootfs/$f" scripts/build-rootfs-image.sh
-    cp "build/rootfs/$f" "$REL/rootfs/"
-  done
-else
-  skip "rootfs 渠道（build-rootfs-image.sh）"
-fi
-
-for ch in payload sysroot rootfs; do
+for ch in payload sysroot; do
   [[ -n "$(ls "$REL/$ch" 2>/dev/null)" ]] || { echo "nothing packed for channel $ch" >&2; exit 1; }
   echo ">> 渠道 $ch:"; ls "$REL/$ch"
 done

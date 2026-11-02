@@ -124,13 +124,6 @@ if [[ -f "$REL/rootfs-x86_64.tar.gz" ]]; then
 else
   skip "x86_64 guest tree"
 fi
-if [[ -f "$REL/rootfs/rootfs-arm64.tar.zst" ]]; then
-  zstd -q -t "$REL/rootfs/rootfs-arm64.tar.zst" || fail "device pack rootfs-arm64.tar.zst is corrupt"
-  [[ -s "$REL/rootfs/rootfs-arm64.uris.txt" ]] || fail "missing lock list rootfs-arm64.uris.txt"
-  pass "device pack + lock list"
-else
-  skip "device pack"
-fi
 
 rm -rf "$UNPACK"
 echo ">> SMOKE PASS"
