@@ -79,6 +79,19 @@ check() {
 
 # An axis value with a tolerance: SDL normalizes the joystick axis with floats,
 # so the game sees the trigger a LSB off the exact fraction.
+# 断言假宿主（宿主侧）看到的报文。
+# Checks what the fake host (the host side) saw.
+check_host() {
+  local pattern="$1" what="$2"
+  if grep -Eq "$pattern" "$OUT/nxp2-host.log"; then
+    echo "ok   $what"
+    pass=$((pass + 1))
+  else
+    echo "FAIL $what (pattern: $pattern)"
+    fail=$((fail + 1))
+  fi
+}
+
 check_axis() {
   local axis="$1" expected="$2" tolerance="$3" what="$4"
   local value
@@ -180,6 +193,20 @@ check "^TOUCHSTATE $p1 [01] 1 " "SDL query reports an active touch with coordina
 check "^TOUCHSTATE $p1 [01] 0 " "SDL query reports touch release"
 check "^BUTTONSTATE $p1 20 1$" "SDL query reports standard Touch click down"
 check "^BUTTONSTATE $p1 20 0$" "SDL query reports standard Touch click release"
+# 版本协商：假宿主与垫片都讲 2..3，协商结果必须是 3（v3 才有震动报文）。
+# The version negotiation: both ends speak 2..3, so the result must be 3 (v3
+# is where the rumble message exists).
+check_host "NXP2 HELLO .*version=3" "the version negotiation landed on v3"
+check_host "NXP2 READY .*version=3" "the READY was exchanged at v3"
+# 震动回程：游戏侧调 SDL_RumbleGamepad，垫片把它变成回给宿主的报文。
+# The rumble return path: the game calls SDL_RumbleGamepad and the shim turns
+# it into a message back to the host.
+check "^RUMBLE id=[0-9]+ ok=1 strong=40000 weak=20000 " "the gamepad accepted the rumble"
+check "^RUMBLE id=[0-9]+ ok=1 strong=0 weak=0 " "the gamepad accepted the stop"
+check_host "^NXP2 RUMBLE player=0 strong=40000 weak=20000$" \
+      "the host received the rumble intensity"
+check_host "^NXP2 RUMBLE player=0 strong=0 weak=0$" "the host received the stop"
+
 if grep -q "NXP2 stale generation rejected and input cleared" "$OUT/nxp2-host.log" &&
    { grep -q "NXP2 transport disconnected" "$OUT/nxp2-host.log" ||
      grep -q "NXP2 abnormal message rejected and input cleared" "$OUT/nxp2-host.log"; } &&
@@ -190,6 +217,61 @@ if grep -q "NXP2 stale generation rejected and input cleared" "$OUT/nxp2-host.lo
   pass=$((pass + 1))
 else
   echo "FAIL expected generation rejection, abnormal disconnect, and reconnect"
+  fail=$((fail + 1))
+fi
+
+# 旧宿主（只讲 v2）配新垫片：协商必须退回 v2，垫片不发震动报文，手柄输入照常。
+# An old host (v2 only) with the new shim: the negotiation must fall back to
+# v2, the shim sends no rumble message, and the gamepad input still works.
+V2_SOCKET="$OUT/nxp2-v2.sock"
+python3 tests/fexpad/fakehost.py --nxp2 "$V2_SOCKET" --version 2 > "$OUT/nxp2-v2-host.log" 2>&1 &
+V2_HOST=$!
+for _ in $(seq 1 50); do
+  [ -S "$V2_SOCKET" ] && break
+  sleep 0.1
+done
+[ -S "$V2_SOCKET" ] || { echo "the v2 fake host did not bind its socket"; cat "$OUT/nxp2-v2-host.log"; exit 1; }
+
+NXP_PAD_SOCKET="$V2_SOCKET" FXD_PAD_SHIM_DEBUG=1 env $INJECT "$OUT/padtest" 4 \
+    > "$OUT/nxp2-v2-game.log" 2> "$OUT/nxp2-v2-shim.log" || true
+wait "$V2_HOST" || true
+V2_HOST=""
+
+echo
+echo "--- v2 host ---"
+cat "$OUT/nxp2-v2-host.log"
+
+check_host_v2() {
+  local pattern="$1" what="$2"
+  if grep -Eq "$pattern" "$OUT/nxp2-v2-host.log"; then
+    echo "ok   $what"
+    pass=$((pass + 1))
+  else
+    echo "FAIL $what (pattern: $pattern)"
+    fail=$((fail + 1))
+  fi
+}
+
+check_host_v2 "NXP2 HELLO .*version=2" "an old host negotiates v2 with the new shim"
+if grep -Eq "^NXP2 RUMBLE player=" "$OUT/nxp2-v2-host.log"; then
+  echo "FAIL the shim sent a rumble message on a v2 link"
+  fail=$((fail + 1))
+else
+  echo "ok   the shim sends no rumble message on a v2 link"
+  pass=$((pass + 1))
+fi
+if grep -Eq "^GAMEPADS 2$" "$OUT/nxp2-v2-game.log"; then
+  echo "ok   the gamepad input still works on a v2 link"
+  pass=$((pass + 1))
+else
+  echo "FAIL the gamepad input broke on a v2 link"
+  fail=$((fail + 1))
+fi
+if grep -Eq "^RUMBLE id=[0-9]+ ok=0 strong=40000 weak=20000" "$OUT/nxp2-v2-game.log"; then
+  echo "ok   the gamepad reports no rumble support on a v2 link"
+  pass=$((pass + 1))
+else
+  echo "FAIL expected the gamepad to report no rumble support on a v2 link"
   fail=$((fail + 1))
 fi
 

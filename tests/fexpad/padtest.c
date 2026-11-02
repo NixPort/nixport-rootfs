@@ -109,6 +109,24 @@ static void report_touch_state(TestPad *entry) {
     }
 }
 
+// 震动：游戏侧调用 SDL_RumbleGamepad，垫片的回调把它变成回给宿主的报文。
+// The rumble: the game calls SDL_RumbleGamepad and the shim's callback turns
+// it into a message back to the host.
+static void rumble(TestPad *entry, Uint16 strong, Uint16 weak, Uint32 duration_ms) {
+    if (!entry || !entry->gamepad) {
+        // 手柄已经被撤走（连接断开时虚拟手柄会注销）：也要留痕，否则看不出
+        // 「停震那一下」到底有没有发出去。
+        // The pad is gone (the virtual pad is withdrawn when the connection
+        // drops): leave a trace anyway, otherwise there is no way to tell
+        // whether the stop was ever sent.
+        printf("RUMBLE id=0 ok=0 strong=%u weak=%u (no gamepad)\n", strong, weak);
+        return;
+    }
+    bool ok = SDL_RumbleGamepad(entry->gamepad, strong, weak, duration_ms);
+    printf("RUMBLE id=%u ok=%d strong=%u weak=%u at=%llu\n", entry->id, ok ? 1 : 0, strong,
+           weak, (unsigned long long)SDL_GetTicks());
+}
+
 int main(int argc, char **argv) {
     int seconds = argc > 1 ? atoi(argv[1]) : 4;
 
@@ -124,6 +142,12 @@ int main(int argc, char **argv) {
     SDL_free(ids);
 
     Uint64 deadline = SDL_GetTicks() + (Uint64)seconds * 1000;
+    // 震动一次再停掉：停掉那一下必须是 (0, 0)，宿主据此让马达停下。
+    // Rumble once and then stop: the stop must arrive as (0, 0), which is what
+    // the host uses to stop the motor.
+    Uint64 rumble_at = SDL_GetTicks() + 300;
+    Uint64 rumble_stop_at = SDL_GetTicks() + 500;
+    int rumble_started = 0, rumble_stopped = 0;
     while (SDL_GetTicks() < deadline) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -164,6 +188,14 @@ int main(int argc, char **argv) {
             if (!pads[i].gamepad) continue;
             report_button_state(&pads[i]);
             report_touch_state(&pads[i]);
+        }
+        if (!rumble_started && SDL_GetTicks() >= rumble_at) {
+            rumble_started = 1;
+            rumble(&pads[0], 40000, 20000, 1000);
+        }
+        if (rumble_started && !rumble_stopped && SDL_GetTicks() >= rumble_stop_at) {
+            rumble_stopped = 1;
+            rumble(&pads[0], 0, 0, 0);
         }
         SDL_Delay(5);
     }

@@ -233,7 +233,7 @@ typedef struct {
 } Slot;
 
 typedef struct {
-    uint32_t instance;
+    int instance;
     void *joystick;
     uint8_t buttons[FXD_BTN_COUNT];
     int16_t axes[FXD_AXIS_COUNT];
@@ -242,6 +242,16 @@ typedef struct {
     float touch_x[NXP2_MAX_TOUCHES];
     float touch_y[NXP2_MAX_TOUCHES];
     uint8_t touchpad_click;
+    // 震动状态：SDL 的震动回调只记录当前强度，发包由读线程按节拍做
+    // （回调跑在游戏的线程上，绝不能在那里发包）。
+    // The rumble state: SDL's rumble callback only records the current
+    // intensity; the reader thread does the sending (the callback runs on the
+    // game's own thread and must never block on a socket write).
+    uint16_t rumble_strong;   // 当前强度（SDL 回调写）
+    uint16_t rumble_weak;
+    uint16_t rumble_sent_strong; // 上次发出的强度（读线程写）
+    uint16_t rumble_sent_weak;
+    uint64_t rumble_sent_ms;   // 上次发出的时刻（心跳节拍用）
 } Nxp2Player;
 
 typedef struct {
@@ -277,6 +287,26 @@ static uint64_t g_nxp2_rx_sequence;
 static uint64_t g_nxp2_tx_sequence;
 static uint32_t g_nxp2_capabilities;
 static uint8_t g_nxp2_player_limit = 1;
+// 协商出来的协议版本：0 = 还没握手。震动报文只在 >= 3 时存在。
+// The negotiated protocol version: 0 means "not negotiated yet". The rumble
+// message only exists at >= 3.
+static uint16_t g_nxp2_version;
+// 出站帧的锁：序号自增与发送必须在同一把锁里，否则两个线程可能取到同一个
+// 序号，宿主会判 BAD_SEQUENCE 而断开连接。
+// The outbound lock: taking the next sequence number and sending it must
+// happen together, or two threads can pick the same number and the host
+// drops the connection with BAD_SEQUENCE.
+static pthread_mutex_t g_nxp2_tx_lock = PTHREAD_MUTEX_INITIALIZER;
+// 震动状态的锁：只在复制状态时持有，绝不跨发包持有。
+// The rumble state lock: held only while copying the state, never across a
+// send.
+static pthread_mutex_t g_nxp2_rumble_lock = PTHREAD_MUTEX_INITIALIZER;
+// 震动续发的节拍：SDL 只在强度变化时回调驱动，持续效果每 2 秒才续发一次，
+// 宿主需要更细的心跳才能维持马达。
+// The rumble heartbeat: SDL only calls the driver when the intensity
+// changes and re-sends the same intensity every 2 s, so the host needs a
+// finer heartbeat to keep the motor running.
+#define NXP2_RUMBLE_HEARTBEAT_MS 100
 static Nxp2Player g_nxp2_players[NXP2_MAX_PLAYERS];
 static char g_nxp2_endpoint[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static char g_nxp2_client_path[PATH_MAX];
@@ -504,7 +534,26 @@ static void drop_virtual(void) {
     }
 }
 
-static void nxp2_fill_descriptor(FxdVirtualJoystickDesc *desc, uint32_t capabilities) {
+// SDL 的虚拟手柄震动回调：只记录当前强度，不发包。
+// SDL's virtual joystick rumble callback: records the intensity only.
+// 发包在读线程按节拍做（见 nxp2_pump_rumble）——这个回调跑在游戏的线程上，
+// socket 有 2 秒发送超时，在这里发包会把游戏卡住。
+// The send happens in the reader thread on a fixed beat (see
+// nxp2_pump_rumble): this callback runs on the game's own thread and the
+// socket has a 2 s send timeout, so sending here would stall the game.
+static bool nxp2_rumble_callback(void *userdata, uint16_t low_frequency_rumble,
+                                  uint16_t high_frequency_rumble) {
+    Nxp2Player *player = (Nxp2Player *)userdata;
+    if (!player) return false;
+    pthread_mutex_lock(&g_nxp2_rumble_lock);
+    player->rumble_strong = low_frequency_rumble;
+    player->rumble_weak = high_frequency_rumble;
+    pthread_mutex_unlock(&g_nxp2_rumble_lock);
+    return true;
+}
+
+static void nxp2_fill_descriptor(FxdVirtualJoystickDesc *desc, uint32_t capabilities,
+                                 int player_index) {
     memset(desc, 0, sizeof *desc);
     desc->version = sizeof *desc;
     desc->type = SDL_JOYSTICK_TYPE_GAMEPAD_HINT;
@@ -513,6 +562,14 @@ static void nxp2_fill_descriptor(FxdVirtualJoystickDesc *desc, uint32_t capabili
     desc->nbuttons = (capabilities & NXP2_CAP_TOUCH_CLICK)
                          ? SDL_GAMEPAD_BUTTON_TOUCHPAD_HINT + 1
                          : FXD_BTN_COUNT;
+    // 震动回调：只有协商到 v3 才有这个报文类型，才挂回调；否则 SDL 如实
+    // 报告「不支持震动」，游戏不会去尝试。
+    // The rumble callback: it exists only from v3 on (the message type does);
+    // without it SDL reports "no rumble" and the game never tries.
+    if (player_index >= 0 && player_index < NXP2_MAX_PLAYERS && g_nxp2_version >= 3) {
+        desc->Rumble = nxp2_rumble_callback;
+        desc->userdata = &g_nxp2_players[player_index];
+    }
     if (capabilities & (NXP2_CAP_TOUCH_CONTACTS | NXP2_CAP_TOUCH_CLICK)) {
         desc->name = "Nixport Standard Gamepad";
         if (capabilities & NXP2_CAP_TOUCH_CLICK) {
@@ -533,7 +590,7 @@ static int nxp2_attach_player(int player_index) {
     Nxp2Player *player = &g_nxp2_players[player_index];
     if (player->instance) return 1;
     FxdVirtualJoystickDesc desc;
-    nxp2_fill_descriptor(&desc, g_nxp2_capabilities);
+    nxp2_fill_descriptor(&desc, g_nxp2_capabilities, player_index);
     player->instance = sdl.JoystickAttachVirtual(&desc);
     if (!player->instance) {
         LOGI("SDL refused the virtual gamepad for player %d: %s", player_index + 1,
@@ -622,17 +679,20 @@ static void nxp2_put_u64(uint8_t *p, uint64_t value) {
     for (unsigned i = 0; i < 8; i++) p[i] = (uint8_t)(value >> (i * 8));
 }
 
+// 宿主 → 客机的报文类型：震动报文只走反方向，客机不认它。
+// The host -> guest message types: the rumble message only travels the other
+// way, so the guest does not know it.
 static int nxp2_type_known(uint16_t type) {
     return type >= NXP2_HELLO && type <= NXP2_ERROR;
 }
 
-static int nxp2_send_frame(int fd, uint16_t type, uint64_t generation, uint64_t sequence,
-                           const uint8_t *payload, size_t payload_size) {
+static int nxp2_send_frame(int fd, uint16_t version, uint16_t type, uint64_t generation,
+                           uint64_t sequence, const uint8_t *payload, size_t payload_size) {
     uint8_t packet[NXP2_MAX_PACKET_SIZE];
     if (payload_size > NXP2_MAX_PAYLOAD_SIZE || sequence == 0 || sequence >= INT64_MAX)
         return 0;
     memcpy(packet, NXP2_MAGIC, 4);
-    nxp2_put_u16(packet + 4, NXP2_VERSION);
+    nxp2_put_u16(packet + 4, version);
     nxp2_put_u16(packet + 6, type);
     nxp2_put_u32(packet + 8, (uint32_t)payload_size);
     nxp2_put_u64(packet + 12, generation);
@@ -642,13 +702,87 @@ static int nxp2_send_frame(int fd, uint16_t type, uint64_t generation, uint64_t 
     return send(fd, packet, size, MSG_NOSIGNAL) == (ssize_t)size;
 }
 
+// 当前该盖的帧头版本：握手后是协商结果，握手前是最老能说的版本。
+// The frame version to stamp: the negotiated version after the handshake, the
+// oldest one we speak before it.
+static uint16_t nxp2_frame_version(void) {
+    return g_nxp2_version ? g_nxp2_version : NXP2_VERSION_MIN;
+}
+
+// 取下一个序号并发帧：序号自增与发送必须在同一把锁里，否则两个线程可能
+// 取到同一个序号，宿主会判 BAD_SEQUENCE 而断开连接。
+// Takes the next sequence number and sends the frame: both happen under the
+// lock, or two threads can pick the same number and the host drops the
+// connection with BAD_SEQUENCE.
+static int nxp2_send_locked(int fd, uint16_t type, uint64_t generation,
+                            const uint8_t *payload, size_t payload_size) {
+    int ok;
+    pthread_mutex_lock(&g_nxp2_tx_lock);
+    uint64_t sequence = g_nxp2_tx_sequence++;
+    ok = nxp2_send_frame(fd, nxp2_frame_version(), type, generation, sequence, payload,
+                         payload_size);
+    pthread_mutex_unlock(&g_nxp2_tx_lock);
+    return ok;
+}
+
+// 单调时钟的毫秒数：震动心跳的节拍基准。
+// Monotonic milliseconds: the beat base of the rumble heartbeat.
+static uint64_t nxp2_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+// 震动报文（客机 → 宿主）：player + flags + 强/弱马达强度。
+// The rumble message (guest -> host): player, flags and the two intensities.
+static int nxp2_send_rumble(int player_index, uint16_t strong, uint16_t weak) {
+    uint8_t payload[NXP2_RUMBLE_PAYLOAD_SIZE];
+    payload[0] = (uint8_t)player_index;
+    payload[1] = 0; // flags：保留，必须为 0 / reserved, must be 0
+    nxp2_put_u16(payload + 2, strong);
+    nxp2_put_u16(payload + 4, weak);
+    return nxp2_send_locked(g_nxp2_fd, NXP2_RUMBLE, g_nxp2_generation, payload, sizeof payload);
+}
+
+// 把震动状态发给宿主：强度变了立刻发，持续震动按节拍续发。SDL 自己只在
+// 强度变化时回调驱动、持续效果每 2 秒才续发一次，宿主需要更细的心跳才能
+// 维持马达。归零时发一次 (0, 0)，宿主据此停下。
+// Sends the rumble state to the host: a changed intensity goes out at once, a
+// running one is refreshed on every beat. SDL calls the driver only when the
+// intensity changes and re-sends the same intensity every 2 s, so the host
+// needs a finer heartbeat to keep the motor running. Zero is sent as (0, 0)
+// so the host stops.
+static int nxp2_pump_rumble(void) {
+    if (g_nxp2_version < 3 || g_nxp2_fd < 0) return 1;
+    const uint64_t now = nxp2_now_ms();
+    for (int i = 0; i < NXP2_MAX_PLAYERS; i++) {
+        Nxp2Player *player = &g_nxp2_players[i];
+        if (!player->instance) continue; // 这个玩家没有虚拟手柄
+        uint16_t strong, weak;
+        pthread_mutex_lock(&g_nxp2_rumble_lock);
+        strong = player->rumble_strong;
+        weak = player->rumble_weak;
+        pthread_mutex_unlock(&g_nxp2_rumble_lock);
+        const int changed =
+            strong != player->rumble_sent_strong || weak != player->rumble_sent_weak;
+        if (!changed && !(strong || weak)) continue;              // 没在震，也没变化
+        if (!changed && now - player->rumble_sent_ms < NXP2_RUMBLE_HEARTBEAT_MS) continue;
+        if (!nxp2_send_rumble(i, strong, weak)) return 0;
+        player->rumble_sent_strong = strong;
+        player->rumble_sent_weak = weak;
+        player->rumble_sent_ms = now;
+    }
+    return 1;
+}
+
 static void nxp2_send_error_fd(int fd, uint64_t generation, uint64_t sequence, int error,
                                uint16_t offending_type) {
     if (!generation) return;
     uint8_t payload[4];
     nxp2_put_u16(payload, (uint16_t)error);
     nxp2_put_u16(payload + 2, offending_type);
-    nxp2_send_frame(fd, NXP2_ERROR, generation, sequence, payload, sizeof payload);
+    nxp2_send_frame(fd, nxp2_frame_version(), NXP2_ERROR, generation, sequence, payload,
+                    sizeof payload);
 }
 
 static void nxp2_close_unstarted(int fd) {
@@ -660,9 +794,14 @@ static void nxp2_close_unstarted(int fd) {
     }
 }
 
+// accept_version：0 = 握手前（落在我们支持的区间里即可），非 0 = 必须等于
+// 该值（握手后，帧必须盖协商出来的版本）。
+// accept_version: 0 means "before the handshake" (any version inside our
+// range is fine), a non-zero value means the frame must carry exactly that
+// version (after the handshake).
 static int nxp2_decode_header(const uint8_t *packet, size_t size, uint16_t *type,
                               uint32_t *payload_size, uint64_t *generation, uint64_t *sequence,
-                              enum nxp2_error *error) {
+                              enum nxp2_error *error, uint16_t accept_version) {
     if (size < NXP2_HEADER_SIZE || size > NXP2_MAX_PACKET_SIZE) {
         *error = NXP2_ERR_BAD_LENGTH;
         return 0;
@@ -671,7 +810,13 @@ static int nxp2_decode_header(const uint8_t *packet, size_t size, uint16_t *type
         *error = NXP2_ERR_BAD_MAGIC;
         return 0;
     }
-    if (nxp2_u16(packet + 4) != NXP2_VERSION) {
+    uint16_t version = nxp2_u16(packet + 4);
+    if (accept_version) {
+        if (version != accept_version) {
+            *error = NXP2_ERR_BAD_VERSION;
+            return 0;
+        }
+    } else if (version < NXP2_VERSION_MIN || version > NXP2_VERSION) {
         *error = NXP2_ERR_BAD_VERSION;
         return 0;
     }
@@ -747,7 +892,10 @@ static uint32_t nxp2_probe_capabilities(uint32_t capabilities) {
     if (!touch_capabilities) return capabilities;
 
     FxdVirtualJoystickDesc desc;
-    nxp2_fill_descriptor(&desc, capabilities);
+    // 探测用的临时设备不挂震动回调（没有玩家归属）。
+    // The throwaway device for the probe gets no rumble callback (it has no
+    // player).
+    nxp2_fill_descriptor(&desc, capabilities, -1);
     uint32_t instance = sdl.JoystickAttachVirtual(&desc);
     if (!instance) {
         LOGI("SDL rejected the Touch virtual-device descriptor; continuing without Touch");
@@ -848,11 +996,16 @@ static int nxp2_handshake(void) {
 
     uint32_t supported_capabilities = nxp2_supported_capabilities();
     uint8_t hello[12] = {0};
-    nxp2_put_u16(hello, NXP2_VERSION);
+    // HELLO 的帧头写我们还愿意说的最老版本（此刻还不知道对方的范围），载荷
+    // 里给出我们能说的区间；旧宿主按老规矩收下，回一个 v2 的 WELCOME。
+    // The HELLO frame carries the oldest version we still speak (the peer's
+    // range is unknown yet); the payload states the range we speak. An older
+    // host takes it as before and answers with a v2 WELCOME.
+    nxp2_put_u16(hello, NXP2_VERSION_MIN);
     nxp2_put_u16(hello + 2, NXP2_VERSION);
     nxp2_put_u32(hello + 4, supported_capabilities);
     hello[8] = NXP2_MAX_PLAYERS;
-    if (!nxp2_send_frame(fd, NXP2_HELLO, 0, 1, hello, sizeof hello)) {
+    if (!nxp2_send_frame(fd, NXP2_VERSION_MIN, NXP2_HELLO, 0, 1, hello, sizeof hello)) {
         LOGV("NXP2 HELLO send failed: %s", strerror(errno));
         nxp2_close_unstarted(fd);
         return 0;
@@ -867,7 +1020,7 @@ static int nxp2_handshake(void) {
     enum nxp2_error error = NXP2_ERR_BAD_VALUE;
     int header_ok =
         got > 0 && nxp2_decode_header(packet, (size_t)got, &type, &payload_size, &generation,
-                                      &sequence, &error);
+                                      &sequence, &error, 0);
     if (!header_ok || type != NXP2_WELCOME || payload_size != 28) {
         if (header_ok && type != NXP2_WELCOME) error = NXP2_ERR_UNSUPPORTED_MESSAGE;
         if (header_ok && payload_size != 28) error = NXP2_ERR_BAD_LENGTH;
@@ -884,8 +1037,19 @@ static int nxp2_handshake(void) {
     const uint8_t *welcome = packet + NXP2_HEADER_SIZE;
     uint32_t capabilities = nxp2_u32(welcome + 4);
     uint8_t player_limit = welcome[8];
-    if (nxp2_u16(welcome) != NXP2_VERSION || nxp2_u16(welcome + 2) != 0 ||
-        (capabilities & ~supported_capabilities) || player_limit < 1 ||
+    // WELCOME 头一个 u16 是协商出来的版本：取它，之后所有帧都盖这个版本。
+    // The first u16 of the WELCOME is the negotiated version: take it and
+    // stamp it on every frame from now on.
+    uint16_t negotiated = nxp2_u16(welcome);
+    if (negotiated < NXP2_VERSION_MIN || negotiated > NXP2_VERSION) {
+        nxp2_send_error_fd(fd, generation, 2, NXP2_ERR_BAD_VERSION, NXP2_WELCOME);
+        LOGI("NXP2 WELCOME names a version we do not speak: %u", negotiated);
+        nxp2_close_unstarted(fd);
+        return 0;
+    }
+    g_nxp2_version = negotiated;
+    if (nxp2_u16(welcome + 2) != 0 || (capabilities & ~supported_capabilities) ||
+        player_limit < 1 ||
         player_limit > NXP2_MAX_PLAYERS ||
         (player_limit > 1 && !(capabilities & NXP2_CAP_MULTI_PLAYER)) ||
         (welcome[9] != 0 && welcome[9] != NXP2_MAX_TOUCHES) ||
@@ -902,7 +1066,7 @@ static int nxp2_handshake(void) {
     nxp2_put_u32(ready, capabilities);
     ready[4] = player_limit;
     ready[5] = (capabilities & NXP2_CAP_TOUCH_CONTACTS) ? NXP2_MAX_TOUCHES : 0;
-    if (!nxp2_send_frame(fd, NXP2_READY, generation, 2, ready, sizeof ready)) {
+    if (!nxp2_send_frame(fd, g_nxp2_version, NXP2_READY, generation, 2, ready, sizeof ready)) {
         LOGI("NXP2 READY send failed: %s", strerror(errno));
         nxp2_close_unstarted(fd);
         return 0;
@@ -913,8 +1077,8 @@ static int nxp2_handshake(void) {
     g_nxp2_player_limit = player_limit;
     g_nxp2_rx_sequence = sequence;
     g_nxp2_tx_sequence = 3;
-    LOGI("NXP2 ready: generation %llu, %u player(s), capabilities 0x%x",
-         (unsigned long long)generation, player_limit, capabilities);
+    LOGI("NXP2 ready: generation %llu, version %u, %u player(s), capabilities 0x%x",
+         (unsigned long long)generation, g_nxp2_version, player_limit, capabilities);
     return 1;
 }
 
@@ -1079,9 +1243,11 @@ static int nxp2_apply_snapshot(const uint8_t *payload, size_t size) {
 }
 
 static void nxp2_send_error(int error, uint16_t offending_type) {
-    if (g_nxp2_tx_sequence && g_nxp2_tx_sequence < INT64_MAX)
-        nxp2_send_error_fd(g_nxp2_fd, g_nxp2_generation, g_nxp2_tx_sequence++, error,
-                           offending_type);
+    if (!g_nxp2_tx_sequence || g_nxp2_tx_sequence >= INT64_MAX) return;
+    uint8_t payload[4];
+    nxp2_put_u16(payload, (uint16_t)error);
+    nxp2_put_u16(payload + 2, offending_type);
+    nxp2_send_locked(g_nxp2_fd, NXP2_ERROR, g_nxp2_generation, payload, sizeof payload);
 }
 
 static void nxp2_clear_connection(void) {
@@ -1093,6 +1259,16 @@ static void nxp2_clear_connection(void) {
     g_nxp2_tx_sequence = 0;
     g_nxp2_capabilities = 0;
     g_nxp2_player_limit = 1;
+    g_nxp2_version = 0;
+    for (int i = 0; i < NXP2_MAX_PLAYERS; i++) {
+        pthread_mutex_lock(&g_nxp2_rumble_lock);
+        g_nxp2_players[i].rumble_strong = 0;
+        g_nxp2_players[i].rumble_weak = 0;
+        g_nxp2_players[i].rumble_sent_strong = 0;
+        g_nxp2_players[i].rumble_sent_weak = 0;
+        g_nxp2_players[i].rumble_sent_ms = 0;
+        pthread_mutex_unlock(&g_nxp2_rumble_lock);
+    }
     if (g_nxp2_client_path[0]) {
         unlink(g_nxp2_client_path);
         g_nxp2_client_path[0] = 0;
@@ -1106,9 +1282,16 @@ static void *nxp2_thread(void *arg) {
         int disconnected = 0;
         while (!disconnected) {
             struct pollfd pfd = {.fd = g_nxp2_fd, .events = POLLIN};
-            int ready = poll(&pfd, 1, -1);
+            // 超时即心跳的节拍：震动状态由这里发，不占用游戏线程。
+            // The timeout is the heartbeat beat: the rumble state goes out
+            // from here, never from the game's thread.
+            int ready = poll(&pfd, 1, NXP2_RUMBLE_HEARTBEAT_MS);
             if (ready < 0) {
                 if (errno == EINTR) continue;
+                disconnected = 1;
+                continue;
+            }
+            if (!nxp2_pump_rumble()) {
                 disconnected = 1;
                 continue;
             }
@@ -1129,7 +1312,7 @@ static void *nxp2_thread(void *arg) {
             uint64_t sequence = 0;
             enum nxp2_error error = NXP2_ERR_BAD_VALUE;
             int parsed = nxp2_decode_header(packet, (size_t)got, &type, &payload_size,
-                                            &generation, &sequence, &error);
+                                            &generation, &sequence, &error, g_nxp2_version);
             if (!parsed) {
                 nxp2_send_error(error, 0);
                 disconnected = 1;
@@ -1155,8 +1338,7 @@ static void *nxp2_thread(void *arg) {
             g_nxp2_rx_sequence = sequence;
             uint8_t ack[8];
             nxp2_put_u64(ack, sequence);
-            if (!nxp2_send_frame(g_nxp2_fd, NXP2_ACK, g_nxp2_generation,
-                                 g_nxp2_tx_sequence++, ack, sizeof ack))
+            if (!nxp2_send_locked(g_nxp2_fd, NXP2_ACK, g_nxp2_generation, ack, sizeof ack))
                 disconnected = 1;
         }
 

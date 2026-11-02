@@ -3,7 +3,7 @@
 native-track shim test (tools/fexpad/libfexpad.c).
 
 usage: fakehost.py <dir> <node> [script]
-       fakehost.py --nxp2 <socket-path>
+       fakehost.py --nxp2 <socket-path> [--version N]
 
 Binds <dir>/event<node> like the app does, reads the "FXP1" hello the guest
 sends, and then sends the event packets listed in <script> (one packet per
@@ -26,9 +26,20 @@ SOCK_TYPE = SEQ if SEQ is not None else socket.SOCK_DGRAM
 EV_SIZE = 24  # struct input_event on 64-bit Linux
 HELLO_MAGIC = 0x31505846
 NXP2_MAGIC = b"NXP2"
-NXP2_VERSION = 2
+# 版本协商：假宿主和垫片一样，最老说 2、最新说 3；HELLO 的帧头带 min，
+# 载荷里给出区间，协商结果 = min(对端 max, 我方 max)。
+# The version negotiation: the fake host speaks 2..3 like the shim. The HELLO
+# frame carries min, the payload states the range, and the negotiated version
+# is min(peer max, own max).
+NXP2_VERSION_MIN = 2
+NXP2_VERSION = 3
+NXP2_RUMBLE = 7
 NXP2_HEADER_SIZE = 28
 NXP2_PLAYER_RECORD_SIZE = 48
+
+# 客机发来的震动报文（宿主侧收下并记账，供测试断言）。
+# The rumble frames the guest sends; the host side collects them for the test.
+NXP2_RUMBLE_FRAMES = []
 
 
 def bind_server(path):
@@ -59,8 +70,8 @@ def parse_group(line):
     return out
 
 
-def nxp2_frame(message_type, generation, sequence, payload=b""):
-    return struct.pack("<4sHHIQQ", NXP2_MAGIC, NXP2_VERSION, message_type, len(payload),
+def nxp2_frame(message_type, generation, sequence, payload=b"", version=NXP2_VERSION):
+    return struct.pack("<4sHHIQQ", NXP2_MAGIC, version, message_type, len(payload),
                        generation, sequence) + payload
 
 
@@ -68,6 +79,22 @@ def nxp2_header(packet):
     if len(packet) < NXP2_HEADER_SIZE:
         raise RuntimeError(f"short NXP2 packet: {packet.hex()}")
     return struct.unpack("<4sHHIQQ", packet[:NXP2_HEADER_SIZE])
+
+
+def nxp2_expect(peer):
+    """收一帧：震动报文（客机 → 宿主）可能插在中间，收下并记账后继续。
+    Receives one frame: a rumble frame (guest -> host) may arrive in between;
+    it is collected and the next frame is returned."""
+    while True:
+        packet = peer.receive()
+        header = nxp2_header(packet)
+        if header[2] == NXP2_RUMBLE:
+            player, flags, strong, weak = struct.unpack("<BBHH",
+                                                        packet[NXP2_HEADER_SIZE:])
+            NXP2_RUMBLE_FRAMES.append((player, strong, weak))
+            print(f"NXP2 RUMBLE player={player} strong={strong} weak={weak}", flush=True)
+            continue
+        return header, packet
 
 
 def nxp2_record(player, active=True, buttons=0, axes=(0, 0, 0, 0), triggers=(0, 0),
@@ -112,7 +139,7 @@ class Nxp2Peer:
             self.conn = None
 
 
-def nxp2_accept(server, kind):
+def nxp2_accept(server, kind, host_version=None):
     peer = Nxp2Peer(server, kind)
     if kind == SEQ:
         peer.conn, _ = server.accept()
@@ -120,44 +147,63 @@ def nxp2_accept(server, kind):
     else:
         packet = peer.receive()
     header = nxp2_header(packet)
-    magic, version, message_type, payload_size, generation, sequence = header
-    if (magic, version, message_type, payload_size, generation, sequence) != (
-            NXP2_MAGIC, NXP2_VERSION, 1, 12, 0, 1):
+    magic, frame_version, message_type, payload_size, generation, sequence = header
+    # HELLO 的帧头带的是发方还愿意说的最老版本。
+    # The HELLO frame carries the oldest version the sender still speaks.
+    if (magic, frame_version, message_type, payload_size, generation, sequence) != (
+            NXP2_MAGIC, NXP2_VERSION_MIN, 1, 12, 0, 1):
         raise RuntimeError(f"bad NXP2 HELLO: {header}")
     hello = struct.unpack("<HHIB3s", packet[NXP2_HEADER_SIZE:])
-    if hello[0] != NXP2_VERSION or hello[1] != NXP2_VERSION or hello[2] != 7 or hello[3] != 4:
+    if hello[0] != NXP2_VERSION_MIN or hello[1] != NXP2_VERSION or hello[2] != 7 \
+            or hello[3] != 4:
         raise RuntimeError(f"unexpected NXP2 capabilities: {hello}")
-    print(f"NXP2 HELLO capabilities={hello[2]:#x} players={hello[3]}", flush=True)
+    # 假宿主可以只讲老版本（--version 2）：这时垫片必须退回 v2，不发震动。
+    # The fake host can speak an older version only (--version 2): the shim
+    # must fall back to v2 and send no rumble.
+    negotiated = min(hello[1], NXP2_VERSION if host_version is None else host_version)
+    print(f"NXP2 HELLO capabilities={hello[2]:#x} players={hello[3]} version={negotiated}",
+          flush=True)
+    peer.version = negotiated
     return peer
 
 
 def nxp2_welcome(peer, generation):
-    payload = struct.pack("<HHIBBH16s", NXP2_VERSION, 0, 7, 2, 2, 0,
+    version = getattr(peer, "version", NXP2_VERSION)
+    # WELCOME 的帧头与载荷头都带协商出来的版本。
+    # The WELCOME frame and its payload both carry the negotiated version.
+    payload = struct.pack("<HHIBBH16s", version, 0, 7, 2, 2, 0,
                           bytes([generation & 0xFF]) * 16)
-    peer.send(nxp2_frame(2, generation, 2, payload))
-    ready = peer.receive()
-    header = nxp2_header(ready)
-    expected = (NXP2_MAGIC, NXP2_VERSION, 3, 8, generation, 2)
+    peer.send(nxp2_frame(2, generation, 2, payload, version))
+    header, ready = nxp2_expect(peer)
+    expected = (NXP2_MAGIC, version, 3, 8, generation, 2)
     response = struct.unpack("<IBBH", ready[NXP2_HEADER_SIZE:])
     if header != expected or response != (7, 2, 2, 0):
         raise RuntimeError(f"bad NXP2 READY: {header} {response}")
-    print(f"NXP2 READY generation={generation:#x} capabilities={response[0]:#x}",
-          flush=True)
+    print(f"NXP2 READY generation={generation:#x} capabilities={response[0]:#x} "
+          f"version={version}", flush=True)
 
 
 def nxp2_snapshot(peer, generation, sequence, records, delay=0.12):
+    version = getattr(peer, "version", NXP2_VERSION)
     payload = bytes([len(records), 0, 0, 0]) + b"".join(records)
-    peer.send(nxp2_frame(4, generation, sequence, payload))
-    ack = peer.receive()
-    header = nxp2_header(ack)
-    if header != (NXP2_MAGIC, NXP2_VERSION, 5, 8, generation, sequence):
+    peer.send(nxp2_frame(4, generation, sequence, payload, version))
+    header, ack = nxp2_expect(peer)
+    # ACK 帧自己的序号是客机的出站计数器（震动报文也占号），载荷里才是它
+    # 确认的那一帧的序号。
+    # The ACK frame carries the guest's own outbound counter (rumble frames
+    # take numbers too); its payload holds the sequence it acknowledges.
+    if header[0:2] != (NXP2_MAGIC, version) or header[2] != 5 or header[3] != 8 \
+            or header[4] != generation:
         raise RuntimeError(f"bad NXP2 ACK header: {header}")
+    if header[5] <= getattr(peer, "last_ack_sequence", 0):
+        raise RuntimeError(f"NXP2 ACK sequence did not advance: {header}")
+    peer.last_ack_sequence = header[5]
     if struct.unpack("<Q", ack[NXP2_HEADER_SIZE:])[0] != sequence:
         raise RuntimeError(f"bad NXP2 ACK payload: {ack.hex()}")
     time.sleep(delay)
 
 
-def run_nxp2(endpoint):
+def run_nxp2(endpoint, host_version=None):
     try:
         os.unlink(endpoint)
     except FileNotFoundError:
@@ -167,7 +213,7 @@ def run_nxp2(endpoint):
         server.listen(4)
     server.settimeout(8)
     try:
-        first = nxp2_accept(server, kind)
+        first = nxp2_accept(server, kind, host_version)
         generation = 0x10203040
         nxp2_welcome(first, generation)
         nxp2_snapshot(first, generation, 3, [
@@ -189,16 +235,16 @@ def run_nxp2(endpoint):
         nxp2_snapshot(first, generation, 8, [nxp2_record(0)], delay=0.08)
 
         bad_generation = bytes([1, 0, 0, 0]) + nxp2_record(0)
-        first.send(nxp2_frame(4, generation - 1, 9, bad_generation))
-        error = first.receive()
-        header = nxp2_header(error)
+        first.send(nxp2_frame(4, generation - 1, 9, bad_generation,
+                              getattr(first, "version", NXP2_VERSION)))
+        header, error = nxp2_expect(first)
         error_payload = struct.unpack("<HH", error[NXP2_HEADER_SIZE:])
         if header[2] != 6 or error_payload != (8, 4):
             raise RuntimeError(f"bad generation error: {header} {error_payload}")
         print("NXP2 stale generation rejected and input cleared", flush=True)
         first.close_connection()
 
-        second = nxp2_accept(server, kind)
+        second = nxp2_accept(server, kind, host_version)
         generation = 0x50607080
         nxp2_welcome(second, generation)
         nxp2_snapshot(second, generation, 3, [
@@ -209,19 +255,21 @@ def run_nxp2(endpoint):
             second.close_connection()
             print("NXP2 transport disconnected", flush=True)
         else:
-            second.send(nxp2_frame(6, generation, 4, struct.pack("<HH", 6, 6)))
-            error = second.receive()
-            header = nxp2_header(error)
+            second.send(nxp2_frame(6, generation, 4, struct.pack("<HH", 6, 6),
+                                   getattr(second, "version", NXP2_VERSION)))
+            header, error = nxp2_expect(second)
             error_payload = struct.unpack("<HH", error[NXP2_HEADER_SIZE:])
             if header[2] != 6 or error_payload != (6, 6):
                 raise RuntimeError(f"bad unsupported-message error: {header} {error_payload}")
             print("NXP2 abnormal message rejected and input cleared", flush=True)
             second.close_connection()
 
-        third = nxp2_accept(server, kind)
+        third = nxp2_accept(server, kind, host_version)
         generation = 0x90A0B0C0
         nxp2_welcome(third, generation)
         print("NXP2 reconnect HELLO received", flush=True)
+        print(f"NXP2 RUMBLE FRAMES {len(NXP2_RUMBLE_FRAMES)} "
+              f"{NXP2_RUMBLE_FRAMES}", flush=True)
         time.sleep(4.5)
         third.close_connection()
         return 0
@@ -235,9 +283,12 @@ def run_nxp2(endpoint):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--nxp2":
-        if len(sys.argv) != 3:
-            raise SystemExit("usage: fakehost.py --nxp2 <socket-path>")
-        return run_nxp2(sys.argv[2])
+        if len(sys.argv) < 3:
+            raise SystemExit("usage: fakehost.py --nxp2 <socket-path> [--version N]")
+        version = None
+        if "--version" in sys.argv:
+            version = int(sys.argv[sys.argv.index("--version") + 1])
+        return run_nxp2(sys.argv[2], version)
 
     directory = sys.argv[1]
     node = int(sys.argv[2]) if len(sys.argv) > 2 else 200

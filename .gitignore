@@ -1,1 +1,3 @@
 .vscode/
+# The shim's PC test output (tests/fexpad/run-host.sh).
+build/fexpad-test/
