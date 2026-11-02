@@ -57,6 +57,22 @@ cp "$ICD" "$DEST$FXD_ROOT/usr/share/vulkan/icd.d/"
 N="$(ls "$DEST$FXD_ROOT/usr/share/vulkan/icd.d"/*.json 2>/dev/null | wc -l)"
 [[ "$N" -eq 1 ]] || fail "icd.d must contain exactly 1 json, got $N"
 
+# ICD library_path 规范化：fragment 的前缀由 drivers 侧拼装（实测出现过
+# /usr/usr 双写——emit 脚本自拼 /usr/lib 而调用方又传了 /usr 前缀）。这里不猜
+# 来源前缀，直接按落位位置重写为设备绝对路径。
+# Normalize ICD library_path: the drivers side assembles its own prefix (a
+# doubled /usr/usr was observed). Rewrite to the actual placed path.
+LIBN="$(basename "$SO")"
+python3 - "$DEST$FXD_ROOT/usr/share/vulkan/icd.d/" "$FXD_ROOT/usr/lib/$FXD_MULTIARCH/$LIBN" <<'PY'
+import json, sys, pathlib
+icd_dir, want = pathlib.Path(sys.argv[1]), sys.argv[2]
+for f in icd_dir.glob("*.json"):
+    d = json.loads(f.read_text())
+    d["ICD"]["library_path"] = want
+    f.write_text(json.dumps(d, indent=2) + "\n")
+    print(f"icd normalized: {f.name} -> {want}")
+PY
+
 # 结构自检：ELF aarch64 + ICD 里能找到 freedreno 字样
 file "$DEST/usr/lib/$FXD_MULTIARCH/libvulkan_freedreno.so" | grep -q "ARM aarch64" \
   || fail "driver .so is not aarch64"

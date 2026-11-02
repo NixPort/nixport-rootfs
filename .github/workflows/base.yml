@@ -99,6 +99,8 @@ jobs:
             > build/release/sysroot-x86_64.tar.gz
           ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - rootfs-x86_64.tar | pigz -9 ) \
             > build/release/rootfs-x86_64.tar.gz
+          # 契约文件随发：packages.txt 的 libc6 是全体系的 ABI 基线记录
+          cp build/rootfs/rootfs-arm64.packages.txt build/release/
           for f in rootfs-arm64.tar.gz sysroot-arm64.tar.gz sysroot-x86_64.tar.gz rootfs-x86_64.tar.gz; do
             ( cd build/release && sha256sum "$f" > "$f.sha256" )
           done
