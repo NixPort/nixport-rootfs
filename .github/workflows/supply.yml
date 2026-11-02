@@ -39,7 +39,7 @@ on:
       - 'scripts/pack-release-assets.sh'
       - 'scripts/smoke-test.sh'
       - 'scripts/gen-meta.sh'
-      - 'scripts/fetch-x86-assets.sh'
+      - 'scripts/fetch-base.sh'
       - 'scripts/fetch-fex.sh'
       - 'scripts/fetch-driver.sh'
       - 'scripts/driver-pin.env'
@@ -91,25 +91,15 @@ jobs:
           for f in /usr/lib/llvm-22/bin/*; do sudo ln -sf "$f" /usr/local/bin/$(basename "$f"); done
           clang --version | head -1; meson --version
 
-      # ---- 树类（每次都构建：组装与锁定清单依赖它们） -------------------------
-      - name: Runtime tree (locked image)
-        shell: bash
-        run: |
-          scripts/build-rootfs-image.sh 2>&1 | tail -40
-
-      - name: sysroot-arm64 (x86_64 side fetched from x86-latest)
-        # 范围修订（x86 拆分）：x86_64 客机树 + sysroot-x86_64 是存量稳定输入，
-        # 由独立流水线 x86.yml 构建并发布 x86-latest，主管线只构建 arm64 侧。
-        shell: bash
-        run: |
-          SYSROOT_ONLY=1 SKIP_X86=1 scripts/build-rootfs.sh 2>&1 | tail -20
-
-      - name: Fetch x86_64 assets (x86-latest release)
+      # ---- 原料拉取（base.yml 产出，与 fex.yml 同源） --------------------------
+      - name: Fetch base assets (base-latest release)
+        # 依赖图提升（base.yml）：锁定树 + sysroot-arm64 由原料层构建发布，
+        # 主管线只做 glibc/组装。与 fex.yml 同源 → libc6 契约恒一致。
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/fetch-x86-assets.sh 2>&1 | tail -20
+          scripts/fetch-base.sh rootfs-arm64.tar.gz sysroot-arm64.tar.gz rootfs-arm64.packages.txt 2>&1 | tail -20
 
       # ---- 组件编译（全量；失败即红） ------------------------------------------
       - name: glibc (patched)
@@ -162,8 +152,6 @@ jobs:
         shell: bash
         run: |
           scripts/gen-meta.sh payload
-          scripts/gen-meta.sh sysroot
-          scripts/gen-meta.sh rootfs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -201,16 +189,3 @@ jobs:
               --notes "Cross-compile sysroot for Port developers. Usage: my-docs/移植规范/Port打包规范.md"
           gh release upload "$TAG" --clobber build/release/sysroot/*
           gh release edit "$TAG" --title "Nixport sysroot (libc6: $(grep -m1 '^libc6 ' build/rootfs/rootfs-arm64.packages.txt | awk '{print $2}'))"
-
-      - name: Publish rootfs-latest
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="rootfs-latest$SUFFIX"
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Nixport runtime rootfs (device-direct)" \
-              --notes "Device-direct runtime pack (.tar.zst) + lock lists (uris/base/packages, consumed by nxp-rootfs-topup.sh)."
-          gh release upload "$TAG" --clobber build/release/rootfs/*
-          gh release edit "$TAG" --title "Nixport device rootfs ($SUITE) ${GITHUB_SHA:0:7}"
