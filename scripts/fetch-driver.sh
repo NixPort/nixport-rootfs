@@ -42,7 +42,7 @@ esac
 FRAG="$(find "$WORK" -type d -name aarch64-linux-gnu | head -1)"
 [[ -n "$FRAG" ]] || fail "fragment layout unexpected (no usr/lib/aarch64-linux-gnu/): $DRIVER_ASSET"
 SO="$(find "$(dirname "$FRAG")" -name 'libvulkan_freedreno*.so' | head -1)"
-ICD="$(find "$WORK" -name '*icd*aarch64*.json' -o -name 'freedreno_icd*.json' | grep -v arm64 | head -1)"
+ICD="$(find "$WORK" -path '*vulkan/icd.d*' -name '*.json' | head -1)"
 [[ -n "$SO" ]] || fail "no libvulkan_freedreno*.so in the fragment"
 [[ -n "$ICD" ]] || fail "no ICD json in the fragment"
 
