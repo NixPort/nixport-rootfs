@@ -1,0 +1,102 @@
+# FEX + thunks 独立流水线（范围修订：从 supply.yml 剥离）。
+#
+# 产出：build/fex/install（FEX 本体 + host/guest thunks + ALSA 运行库 + 默认
+# Config.json）打包为 fex-install.tar.gz，发布滚动 release fex-latest，附
+# contract.json（libc6 / fx_package 契约——主管线组装前用它做方向性校验：
+# fex 的 libc6 不新于 Runtime 树的 libc6，反向 = 运行时符号缺失）。
+# 变更触发：patches/fex 或构建脚本/cmake 变更 → 本流水线重建；主管线的 paths
+# 白名单不含这些路径（避免"fex 正在覆盖、supply 正在下载"的竞态窗口）。
+name: fex + thunks
+
+on:
+  workflow_dispatch:
+    inputs:
+      fex_tag:
+        description: 'FEX release tag to build (default FEX-2609)'
+        required: false
+        default: ''
+      snapshot:
+        description: 'Pin the Debian archive (YYYYMMDDTHHMMSSZ); empty = live archive'
+        required: false
+        default: ''
+  push:
+    branches: ['main']
+    tags: ['v*']
+    paths:
+      - 'scripts/build-fex.sh'
+      - 'scripts/cmake/**'
+      - 'patches/fex/**'
+      - '.github/workflows/fex.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fex-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fex:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FEX_TAG: ${{ github.event.inputs.fex_tag }}
+      SNAPSHOT: ${{ github.event.inputs.snapshot }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+
+      # ALSA deb 下载容器是 arm64（binfmt）：脚本内 ensure-binfmt 自保证，
+      # action 只作加速前置。
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Host packages
+        # thunkgen 链接宿主 libclang（llvm-22 全套）；ninja 构建系统；
+        # libarchive-tools（bsdtar 解 .deb）；ccache 供 FEX 的 ENABLE_CCACHE。
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build ccache libarchive-tools file bison flex >/dev/null
+          wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 22 >/dev/null
+          sudo apt-get install -y -qq libclang-cpp22-dev libclang-22-dev llvm-22-dev lld-22 >/dev/null
+          for f in /usr/lib/llvm-22/bin/*; do sudo ln -sf "$f" /usr/local/bin/$(basename "$f"); done
+          clang --version | head -1
+
+      - name: Build fex + thunks
+        shell: bash
+        run: |
+          scripts/build-fex.sh 2>&1 | tail -40
+
+      - name: Pack fex channel
+        shell: bash
+        run: |
+          mkdir -p build/release/fex
+          # 单条目约定：解包即得 build/fex/install 布局
+          ( cd build/fex && tar --sort=name --owner=0 --group=0 -cf - install | pigz -9 ) \
+            > build/release/fex/fex-install.tar.gz
+          cp build/fex/contract.json build/release/fex/
+          (
+            cd build/release/fex
+            sha256sum fex-install.tar.gz > fex-install.tar.gz.sha256
+            ls -la
+          )
+
+      - name: Publish fex-latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view fex-latest >/dev/null 2>&1 || \
+            gh release create fex-latest --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nixport fex + thunks" \
+              --notes "FEX interpreter + host/guest thunks + ALSA runtime. Contract: contract.json (libc6 / fx_package). Consumed by the main supply pipeline (assemble-payload)."
+          gh release upload fex-latest --clobber \
+            build/release/fex/fex-install.tar.gz \
+            build/release/fex/fex-install.tar.gz.sha256 \
+            build/release/fex/contract.json
+          gh release edit fex-latest --title "Nixport fex (${FEX_TAG:-FEX-2609}) ${GITHUB_SHA:0:7}"

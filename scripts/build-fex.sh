@@ -200,3 +200,32 @@ cat > "$INST/usr/share/fex-emu/Config.json" <<JSON
 JSON
 find build/fex/install -type f -name 'FEX*' -perm -u+x | head
 find build/fex/install -name '*-host.so' -o -name '*-guest.so' | sort
+
+# ---- 契约元数据（extract-rootfs-repo x86/fex 拆分）------------------------------------
+# fex 拆分为独立流水线后，主管线在组装前校验这份契约：applicationId 路径一致 +
+# FEX 编译所用 libc6 不新于 Runtime 树的 libc6（旧符号跑在新 glibc 上合法，反向是
+# 运行时符号缺失）。libc6 取自 sysroot-arm64 的 dpkg 状态（FEX 是对它链接的）。
+# ---- Contract metadata (extract-rootfs-repo x86/fex split) --------------------------
+# After the fex split, the main pipeline validates this contract before assembly:
+# applicationId paths must match, and the libc6 FEX was linked against must not be
+# NEWER than the runtime tree's libc6 (old symbols on newer glibc are legal; the
+# reverse means missing symbols at runtime). libc6 comes from sysroot-arm64's dpkg
+# status (FEX is linked against it).
+LIBC6_FEX="$(grep -m1 '^libc6 ' build/rootfs/sysroot-arm64/var/lib/dpkg/status | awk '{print $2}')"
+[[ -n "$LIBC6_FEX" ]] || { echo "libc6 not found in sysroot-arm64 dpkg status" >&2; exit 1; }
+python3 - "$PWD/build/fex" "$FXD_PACKAGE" "$FXD_ROOT" "$FXD_LDSO" "$LIBC6_FEX" "${FEX_TAG}" "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+meta = {
+    "schema": "nixport.fex-meta.v1",
+    "fx_package": sys.argv[2],
+    "fxd_root": sys.argv[3],
+    "fxd_ldso": sys.argv[4],
+    "libc6": sys.argv[5],
+    "fex_tag": sys.argv[6],
+    "built_from": sys.argv[7],
+    "built_at": sys.argv[8],
+}
+(d / "contract.json").write_text(json.dumps(meta, indent=2) + "\n")
+print(f"contract.json: libc6={meta['libc6']}, fex_tag={meta['fex_tag']}")
+PY

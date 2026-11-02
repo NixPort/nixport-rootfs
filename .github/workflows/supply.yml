@@ -30,9 +30,24 @@ on:
     branches: ['main']
     tags: ['v*']
     paths:
-      - 'scripts/**'
-      - 'patches/**'
-      - 'third_party/**'
+      # 显式白名单：patches/fex 只触发 fex.yml、patches/mesa 已退役（驱动改拉
+      # nixport-drivers），避免"fex 正在覆盖 release、supply 正在下载"的竞态窗口。
+      - 'scripts/build-rootfs.sh'
+      - 'scripts/build-rootfs-image.sh'
+      - 'scripts/build-glibc.sh'
+      - 'scripts/assemble-payload.sh'
+      - 'scripts/pack-release-assets.sh'
+      - 'scripts/smoke-test.sh'
+      - 'scripts/gen-meta.sh'
+      - 'scripts/fetch-x86-assets.sh'
+      - 'scripts/fetch-fex.sh'
+      - 'scripts/fetch-driver.sh'
+      - 'scripts/driver-pin.env'
+      - 'scripts/ensure-binfmt.sh'
+      - 'scripts/config.sh'
+      - 'scripts/lib/**'
+      - 'scripts/nxp-port'
+      - 'patches/glibc/**'
       - '.github/workflows/supply.yml'
 
 permissions:
@@ -102,15 +117,30 @@ jobs:
         run: |
           scripts/build-glibc.sh 2>&1 | tail -40
 
-      - name: fex + thunks
+      - name: Fetch fex (fex-latest release)
+        # 范围修订：FEX 构建剥离至 fex.yml。拉取 + 契约校验（fx_package 一致 +
+        # libc6 方向性：fex 的 libc6 上游版本 MUST NOT 新于 Runtime 树——旧符号
+        # 跑在新 glibc 上合法，反向是运行时符号缺失）。无本地重建回退（design D5）。
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/build-fex.sh 2>&1 | tail -40
+          scripts/fetch-fex.sh 2>&1 | tail -20
+          # 契约校验独立成脚本（YAML 块标量里放 heredoc 会破坏缩进）
+          python3 scripts/validate-fex-contract.py \
+            build/fex/contract.json build/rootfs/rootfs-arm64.packages.txt
 
-      - name: mesa turnip (KGSL)
+      - name: Fetch default driver (nixport-drivers, variant=main)
+        # 范围修订：Mesa Turnip 不再自建——nixport-drivers 仓库是驱动构建与发布的
+        # 权责方（变体 main/gen8、KGSL 补丁分层 series.yaml）。这里按
+        # scripts/driver-pin.env 拉取 runtime fragment（usr/lib + icd.d 布局）落位
+        # mesa/install，icd library_path 前缀由 assemble 既有改写块处理。缺资产
+        # 即失败并指名——先去 drivers 仓库触发 CI，没有本地构建回退。
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/build-mesa.sh 2>&1 | tail -40
+          scripts/fetch-driver.sh 2>&1 | tail -20
 
       # ---- 组装 + 打包（渠道分目录） --------------------------------------------
       - name: Assemble payload
