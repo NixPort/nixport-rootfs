@@ -30,6 +30,9 @@ on:
     paths:
       - 'scripts/build-rootfs.sh'
       - 'scripts/build-rootfs-image.sh'
+      - 'scripts/build-glibc.sh'
+      - 'scripts/overlay-glibc.sh'
+      - 'patches/glibc/**'
       - 'scripts/build-x86-sysroot.sh'
       - 'scripts/lib/rootfs-packages.txt'
       - 'scripts/lib/rootfs-trim.sh'
