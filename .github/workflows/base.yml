@@ -85,7 +85,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p build/release
-          NP="$(grep -c '^Package:' build/rootfs/rootfs-arm64.packages.txt)"
+          # packages.txt 是 dpkg-query -W 的裸格式（每行"包名 版本"），不是
+          # dpkg status 的 "Package: xxx" 格式——数行数即可。
+          # packages.txt is dpkg-query -W output ("pkg version" per line), not
+          # dpkg-status format — count lines.
+          NP="$(wc -l < build/rootfs/rootfs-arm64.packages.txt | tr -d ' ')"
           [[ "$NP" -ge 250 ]] || { echo "BASE FAIL: runtime tree has only $NP packages (manifest install broke?)" >&2; exit 1; }
           ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - rootfs-arm64.tar | pigz -9 ) \
             > build/release/rootfs-arm64.tar.gz
