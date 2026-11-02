@@ -73,7 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/fetch-base.sh sysroot-arm64.tar.gz 2>&1 | tail -10
+          scripts/fetch-base.sh sysroot-arm64.tar.gz sysroot-x86_64.tar.gz 2>&1 | tail -10
 
       - name: Build fex + thunks
         shell: bash
