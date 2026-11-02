@@ -1,8 +1,6 @@
 # Runtime 供给流水线（nixport-rootfs）——单流水线构建并组装全部 rootfs 内容，
 # 按**渠道**发布到多个滚动 release（多渠道范围修订）：
 #   payload-latest   成品 payload + version/json + meta（app release 消费）
-#   sysroot-latest   交叉编译 sysroot arm64（Port 开发者；x86_64 为内部输入不外发）
-#   rootfs-latest    设备直装 zst + 锁定清单（手机/topup）
 # multilib 客机树由独立流水线 multilib.yml 负责（手动触发，发布 multilib-latest）。
 # 全量重建（组件部分重建已在多渠道拆分中移除——渠道自足，无需跨渠道补拉）。
 # 发布前两级自检 MUST 通过（spec runtime-supply-chain）：chroot 存活 + 哨兵包 +
@@ -26,26 +24,6 @@ on:
         description: 'Optional suffix for the release tags (empty = *-latest)'
         required: false
         default: ''
-  push:
-    branches: ['main']
-    tags: ['v*']
-    paths:
-      # 显式白名单：patches/fex 只触发 fex.yml、patches/mesa 已退役（驱动改拉
-      # nixport-drivers），避免"fex 正在覆盖 release、supply 正在下载"的竞态窗口。
-      - 'scripts/assemble-payload.sh'
-      - 'scripts/pack-release-assets.sh'
-      - 'scripts/smoke-test.sh'
-      - 'scripts/gen-meta.sh'
-      - 'scripts/fetch-base.sh'
-      - 'scripts/fetch-fex.sh'
-      - 'scripts/fetch-driver.sh'
-      - 'scripts/driver-pin.env'
-      - 'scripts/ensure-binfmt.sh'
-      - 'scripts/config.sh'
-      - 'scripts/lib/**'
-      - 'scripts/nxp-port'
-      - '.github/workflows/supply.yml'
-
 permissions:
   contents: write
 
@@ -181,15 +159,5 @@ jobs:
           gh release upload "$TAG" --clobber build/release/payload/*
           gh release edit "$TAG" --title "Nixport payload ($SUITE) ${GITHUB_SHA:0:7}"
 
-      - name: Publish sysroot-latest
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="sysroot-latest$SUFFIX"
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Nixport cross sysroot (arm64)" \
-              --notes "Cross-compile sysroot for Port developers. Usage: my-docs/移植规范/Port打包规范.md"
           gh release upload "$TAG" --clobber build/release/sysroot/*
           gh release edit "$TAG" --title "Nixport sysroot (libc6: $(grep -m1 '^libc6 ' build/rootfs/rootfs-arm64.packages.txt | awk '{print $2}'))"

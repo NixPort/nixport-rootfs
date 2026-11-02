@@ -20,8 +20,8 @@ graph LR
         F --> S
         M["multilib.yml<br/>(手动)"] 
     end
-    S --> P["payload-latest<br/>sysroot-latest"]
-    B --> BL["base-latest<br/>rootfs-latest(设备直装)"]
+    S --> P["payload-latest"]
+    B --> BL["base-latest"]
     F --> FL["fex-latest"]
     M --> ML["multilib-latest"]
     P -.-> A["app 仓库 full-apk.yml<br/>apk-latest"]
@@ -34,11 +34,9 @@ fragment。每条流水线发布独立的滚动 release，上游绿了下游才�
 
 | 渠道 | 发布者 | 内容 | 消费方 |
 |---|---|---|---|
-| `base-latest` | base.yml | 原料层：锁定树 `rootfs-arm64.tar.gz`（**已含补丁 glibc**）+ `packages.txt`（ABI 基线）+ `sysroot-arm64`（纯 Debian）+ `sysroot-x86_64` + x86_64 客机树 + `glibc.tar.gz`（DESTDIR） | fex.yml / supply.yml；Port 开发者 |
-| `rootfs-latest` | base.yml | 设备直装包：`rootfs-arm64.tar.zst` + uris/base/packages 锁定清单 | 手机直装 / `nxp-rootfs-topup.sh` |
+| `base-latest` | base.yml | **原料层全集**：锁定树 `rootfs-arm64.tar.gz`（**已含补丁 glibc**）+ `packages.txt`（ABI 基线）+ `sysroot-arm64`（纯 Debian，**Port 开发者交叉编译用这个**）+ `sysroot-x86_64` + x86_64 客机树 + `glibc.tar.gz`（DESTDIR） | fex.yml / supply.yml；Port 开发者 |
 | `fex-latest` | fex.yml | `fex-install.tar.gz` + `contract.json`（fx_package / fxd_root / fxd_ldso / libc6 / fex_tag） | supply.yml 组装前校验契约 |
 | `payload-latest` | supply.yml | **成品 payload**（组装 + qemu 自测完）：`payload-arm64/x86_64.tar.gz` + `payload.version/json` + `meta.json` | **app release**（`fetch-payload.sh`） |
-| `sysroot-latest` | supply.yml | `sysroot-arm64.tar.gz`（republish 自 base） | **Port 开发者交叉编译** |
 | `multilib-latest` | multilib.yml（手动） | 32 位 x86 客机树 | 手机端运行时下载（X86Rootfs.kt） |
 
 契约文件：`meta.json`（schema `nixport.rootfs-meta.v1`：`fx_package` / `fxd_root` /
@@ -47,21 +45,20 @@ fex 的 `contract.json`、逐资产 `.sha256` 供 `sha256sum -c`。
 
 ## ⭐ 改了什么代码 → 跑哪条流水线
 
-**原则：改动落在哪一层，就从那一层开始跑，绿了以后手动把下游按序跑一遍。**
-push 自动触发只覆盖"本层"文件（见各 workflow 的 `paths`）；跨层依赖（下游要拉
-上游刚发布的资产）**必须等上游绿后手动触发**——上游没绿时并发触发的下游会拉到
-旧资产，跑完无效但无害。
+**全部流水线只手动触发**（`workflow_dispatch`，push 不触发）。原则：改动落在
+哪一层，就从那一层开始跑，绿了以后把下游按序手动跑一遍——下游要拉上游刚发布的
+资产，必须等上游绿。
 
 | 你改了什么 | 触发 | 之后要做 |
 |---|---|---|
-| `patches/glibc/**`、`scripts/build-glibc.sh`、`scripts/overlay-glibc.sh` | **base.yml**（自动） | base 绿 → 手动跑 `supply.yml` |
-| `scripts/lib/rootfs-packages.txt`、`scripts/build-rootfs-image.sh`、`scripts/lib/rootfs-trim.sh` | **base.yml**（自动） | base 绿 → 手动跑 `supply.yml`；若包列表动了 sysroot 也变，建议再跑 `fex.yml`¹ |
-| `scripts/build-x86-sysroot.sh`、`scripts/build-rootfs.sh`（x86 侧） | **base.yml**（自动） | base 绿 → 手动跑 `fex.yml` + `supply.yml` |
-| `patches/fex/**`、`scripts/build-fex.sh`、`scripts/cmake/**` | **fex.yml**（自动） | fex 绿 → 手动跑 `supply.yml` |
-| `scripts/assemble-payload.sh`、`pack-release-assets.sh`、`smoke-test.sh`、`gen-meta.sh`、`fetch-*.sh`、`driver-pin.env`、`config.sh`、`scripts/lib/**`、`nxp-port` | **supply.yml**（自动） | 无（supply 是最后一环） |
-| 32 位 x86 客机树需求 | 手动跑 `multilib.yml` | 无 |
-| drivers 侧（turnip / fragment） | `NixPort/nixport-drivers` 的 `build.yml` | 绿 → 手动跑 `supply.yml` |
-| app 侧（fexdroid 仓库） | `full-apk.yml`（app 仓库，自动/手动） | 拉 `payload-latest` 打 `apk-latest` |
+| `patches/glibc/**`、`scripts/build-glibc.sh`、`scripts/overlay-glibc.sh` | **base.yml**（手动） | base 绿 → 手动跑 `supply.yml` |
+| `scripts/lib/rootfs-packages.txt`、`scripts/build-rootfs-image.sh`、`scripts/lib/rootfs-trim.sh` | **base.yml**（手动） | base 绿 → 手动跑 `supply.yml`；若包列表动了 sysroot 也变，建议再跑 `fex.yml`¹ |
+| `scripts/build-x86-sysroot.sh`、`scripts/build-rootfs.sh`（x86 侧） | **base.yml**（手动） | base 绿 → 手动跑 `fex.yml` + `supply.yml` |
+| `patches/fex/**`、`scripts/build-fex.sh`、`scripts/cmake/**` | **fex.yml**（手动） | fex 绿 → 手动跑 `supply.yml` |
+| `scripts/assemble-payload.sh`、`pack-release-assets.sh`、`smoke-test.sh`、`gen-meta.sh`、`fetch-*.sh`、`driver-pin.env`、`config.sh`、`scripts/lib/**`、`nxp-port` | **supply.yml**（手动） | 无（supply 是最后一环） |
+| 32 位 x86 客机树需求 | `multilib.yml`（手动） | 无 |
+| drivers 侧（turnip / fragment） | `NixPort/nixport-drivers` 的 `build.yml`（手动） | 绿 → 手动跑 `supply.yml` |
+| app 侧（fexdroid 仓库） | `full-apk.yml`（app 仓库，手动） | 拉 `payload-latest` 打 `apk-latest` |
 
 ¹ 拿不准就重跑 fex：多 ~11 分钟，买个 libc6 契约的确定性。
 
@@ -80,7 +77,7 @@ gh run view <run-id> -R NixPort/nixport-rootfs --log-failed
 ```
 
 > ⚠️ 各 workflow 带 `concurrency: cancel-in-progress`：同一条流水线**新触发会取消
-> 在跑的旧 run**。想"补跑一条"只能单发；push 触发后不要再手动 dispatch 同一条。
+> 在跑的旧 run**。想"补跑一条"只能单发一次。
 
 ## 本地调试（改组件补丁，不触 CI、不触 Gradle）
 
@@ -100,7 +97,7 @@ shim 单文件调试（免全量组装）：改 `tools/` 源码 → 本地 clang
 ## Port 开发者：拿 sysroot 交叉编译
 
 ```bash
-gh release download sysroot-latest -R NixPort/nixport-rootfs \
+gh release download base-latest -R NixPort/nixport-rootfs \
   -p sysroot-arm64.tar.gz -p sysroot-arm64.tar.gz.sha256
 sha256sum -c sysroot-arm64.tar.gz.sha256
 tar -C ~/nixport-sysroot -xzf sysroot-arm64.tar.gz

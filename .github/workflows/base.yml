@@ -7,7 +7,6 @@
 #   x86_64 客机树（存量稳定）
 # 发布两个滚动 release：
 #   base-latest   原料资产（fex.yml 与 supply.yml 从这里拉取）
-#   rootfs-latest 设备直装包（zst + uris/base/packages 锁定清单，手机/topup）
 # 包数下限断言在本层拦截（uris 空装 bug 的最早拦截点）。
 # 原先的 x86.yml 已并入本流水线（其产物就是原料）。
 name: base assets
@@ -25,20 +24,6 @@ on:
         description: 'Pin the Debian archive (YYYYMMDDTHHMMSSZ); empty = live archive'
         required: false
         default: ''
-  push:
-    branches: ['main']
-    paths:
-      - 'scripts/build-rootfs.sh'
-      - 'scripts/build-rootfs-image.sh'
-      - 'scripts/build-glibc.sh'
-      - 'scripts/overlay-glibc.sh'
-      - 'patches/glibc/**'
-      - 'scripts/build-x86-sysroot.sh'
-      - 'scripts/lib/rootfs-packages.txt'
-      - 'scripts/lib/rootfs-trim.sh'
-      - 'scripts/ensure-binfmt.sh'
-      - '.github/workflows/base.yml'
-
 permissions:
   contents: write
 
@@ -78,8 +63,7 @@ jobs:
 
       - name: glibc (patched)
         # glibc 归位原料层（extract-rootfs-repo 拆分补完）：补丁版 glibc 是"树的一部分"，
-        # 与树同源（packages.txt 契约）同 run 产出。rootfs-latest 直装包与 payload 的树
-        # 内容从此一致；sysroot 刻意保持纯 Debian（交叉编译视图不受补丁影响）。
+        # 与树同源（packages.txt 契约）同 run 产出，与 payload 组装时覆盖的是同一份 glibc；sysroot 刻意保持纯 Debian（交叉编译视图不受补丁影响）。
         # glibc belongs to the base layer: same source as the tree (packages.txt
         # contract), same run. sysroot stays stock Debian on purpose.
         shell: bash
@@ -147,21 +131,3 @@ jobs:
             build/release/*.sha256
           gh release edit base-latest --title "Nixport base assets ($SUITE) ${GITHUB_SHA:0:7}"
 
-      # 设备直装渠道（同一次构建的锁定树，zst 高压缩）。
-      - name: Publish rootfs-latest (device-direct)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p build/release-rootfs
-          zstd -q -19 -T0 -f build/rootfs/rootfs-arm64.tar -o build/release-rootfs/rootfs-arm64.tar.zst
-          for f in rootfs-arm64.uris.txt rootfs-arm64.base.txt rootfs-arm64.packages.txt; do
-            cp "build/rootfs/$f" build/release-rootfs/
-          done
-          ( cd build/release-rootfs && sha256sum rootfs-arm64.tar.zst > rootfs-arm64.tar.zst.sha256 )
-          gh release view rootfs-latest >/dev/null 2>&1 || \
-            gh release create rootfs-latest --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Nixport runtime rootfs (device-direct)" \
-              --notes "Locked runtime tree (.tar.zst) + lock lists (uris/base/packages, consumed by nxp-rootfs-topup.sh)."
-          gh release upload rootfs-latest --clobber build/release-rootfs/*
-          gh release edit rootfs-latest --title "Nixport device rootfs ($SUITE) ${GITHUB_SHA:0:7}"

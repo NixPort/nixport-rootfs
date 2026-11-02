@@ -1,9 +1,9 @@
 # Shared build configuration, sourced by the build-*.sh scripts.
 # 供给仓库（nixport-rootfs）的共享配置：组件构建的路径真源。app 仓库不 source 本
-# 文件，而是经 rootfs-latest release 的 meta.json 消费这里的取值并做契约校验。
+# 文件，而是经 payload-latest release 的 meta.json 消费这里的取值并做契约校验。
 # Supply repo (nixport-rootfs) shared config: the source of truth for component
 # build paths. The app repo does NOT source this file; it consumes the values
-# via meta.json in the rootfs-latest release and validates the contract there.
+# via meta.json in the payload-latest release and validates the contract there.
 #
 # The on-device rootfs path is baked into glibc and every ELF interpreter, so it
 # must match the app's package name (single build, see the app repo's

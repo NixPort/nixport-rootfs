@@ -2,13 +2,13 @@
 #
 # multilib 只服务 32 位 x86 程序（X86Rootfs.kt 运行时下载安装）。当前没有 32 位
 # 需求，主管线（supply.yml）不再构建它——需要时在这里手动触发，产物直接发布到
-# 同一个滚动 release rootfs-latest（--clobber 只替换 multilib 资产，meta 合并），
+# 独立滚动 release multilib-latest（--clobber 只替换 multilib 资产），
 # app 与主管线均无感知。
 #
 # The x86 multilib guest tree serves 32-bit x86 programs only (runtime download by
 # X86Rootfs.kt). No current 32-bit demand, so the main supply pipeline no longer
 # builds it — trigger here on demand; the asset publishes to the same rolling
-# release rootfs-latest (clobber replaces only the multilib asset, meta merged).
+# release multilib-latest (clobber replaces only the multilib asset).
 name: x86 multilib rootfs
 
 on:
