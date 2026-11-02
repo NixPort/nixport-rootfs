@@ -6,6 +6,24 @@
 # scripts/build-rootfs-image.sh, default "trixie"). "sid" takes every package
 # that sid has a newer version of - a newer glibc and libstdc++. One variable
 # instead of hand-picking packages.
+#
+# Runtime 标配即最终形态：本表列出的包就是设备上 rootfs 带的东西，没有"再装一层"的
+# 后续步骤（app 仓库已无本地装包进 rootfs 的路径）。要加包 = 改这张表 + 重建树 +
+# 发新的 payload release。表尾的 python3.13 家族（python3.13-minimal /
+# libpython3.13-minimal / libpython3.13-stdlib / python3.13 / python3-tk / tk8.6 /
+# tcl8.6 / libtk8.6 / libtcl8.6 / libxft2 / libxrender1）就是 Tkinter 客机
+# （SpartanPort 的启动器）的整套依赖——`_tkinter` C 模块必须与 python3.13 精确同版本
+# 配对，所以整组一起进表，不逐个挑。
+#
+# The Runtime standard IS the final shape: the packages listed here are exactly what
+# the device's rootfs carries — there is no "install one more layer afterwards" step
+# (the app repo has no local install-into-rootfs path any more). Adding a package =
+# edit this table + rebuild the tree + publish a new payload release. The python3.13
+# family at the end (python3.13-minimal / libpython3.13-minimal / libpython3.13-stdlib /
+# python3.13 / python3-tk / tk8.6 / tcl8.6 / libtk8.6 / libtcl8.6 / libxft2 /
+# libxrender1) is the full Tkinter guest dependency set (SpartanPort's launcher):
+# the `_tkinter` C module must match python3.13 exactly, so the whole group goes in
+# together rather than picked one by one.
 
 dash
 coreutils

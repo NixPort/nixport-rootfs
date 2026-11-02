@@ -14,6 +14,30 @@ APT_SNAPSHOT=""
 # steam-libs(-i386): Debian's dependency bundle for the Steam client (contrib/non-free);
 # kept as the shortest way to pull the same GUI stack for both architectures. Plus the
 # recommends that matter without a desktop: fonts, SDL, glib, xkbcommon, dbus.
+#
+# 桌面栈清单的真源就是本数组（+ scripts/lib/rootfs-packages.txt 给 arm64 Runtime 树）。
+# 本树带什么、基础树带什么，都是供给侧的决策——app 仓库不保留第二份包表。
+# The desktop stack's source of truth is THIS array (plus scripts/lib/rootfs-packages.txt
+# for the arm64 Runtime tree). What each tree carries is a supply-side decision; the app
+# repo keeps no second copy of the list.
+#
+# 基础 x86_64 客机树（scripts/build-rootfs.sh 的 X86_PKGS，仅 9 个包）按设计保持精简：
+# 实测其树内没有 libva / libvpl2 / libvdpau1 / ocl-icd-libopencl1 / libfontconfig1 /
+# libfreetype6 / libxcb-shm0 / libxcb-render0 等桌面栈成员。需要桌面栈的客机程序走本树
+# （multilib 渠道）。本树覆盖的包族：
+#   - steam-libs 的 Depends 闭包：libva2、libva-x11-2、libxcb-dri3-0、libxi6、libxinerama1、
+#     libgl1-mesa-dri、libxcb1、libstdc++6、libcrypt1、libelf1t64；
+#   - 显式包表：libsdl2-2.0-0、libfontconfig1、fontconfig、fonts-liberation、
+#     libxkbcommon0、libxkbcommon-x11-0、libxss1、libxdamage1、libxfixes3、libxext6、
+#     libxrandr2、libxrender1、libxcomposite1、libxcursor1、libx11-6、libx11-xcb1、
+#     libxcb1、libglib2.0-0t64、libpulse0、pulseaudio-utils、libnss3、libnspr4、
+#     libgtk-3-0t64、libgbm1、libegl1、libvulkan1、libibus-1.0-5、libxtst6、libvdpau1、
+#     libdbus-1-3、dbus-daemon、dbus-x11。
+# The base x86_64 guest tree (scripts/build-rootfs.sh, X86_PKGS — 9 packages) is minimal
+# BY DESIGN: libva / libvpl2 / libvdpau1 / ocl-icd-libopencl1 / libfontconfig1 /
+# libfreetype6 / libxcb-shm0 / libxcb-render0 are all absent from it. Guest programs that
+# need the desktop stack use THIS tree (the multilib channel). The package families it
+# covers are listed above.
 PKGS=(
   libc6 libstdc++6 coreutils bash ca-certificates curl xz-utils file tar
   steam-libs steam-libs-i386
