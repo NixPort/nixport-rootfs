@@ -59,9 +59,15 @@ jobs:
           ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - sysroot-x86_64 | pigz -9 ) \
             > build/release/x86/sysroot-x86_64.tar.gz
           cp build/rootfs/rootfs-x86_64.packages.txt build/release/x86/
-          ( cd build/release/x86 && sha256sum *.tar.gz > sha256s.txt )
-          for f in *.tar.gz; do ( cd build/release/x86 && sha256sum "$f" > "$f.sha256" ); done
-          ls -la build/release/x86
+          # 显式文件名：glob 必须在目标目录展开，否则字面量 '*.tar.gz' 传入 sha256sum
+          # （首轮实锤：glob 在 repo 根展开 → No such file or directory）。
+          (
+            cd build/release/x86
+            sha256sum rootfs-x86_64.tar.gz sysroot-x86_64.tar.gz > sha256s.txt
+            sha256sum rootfs-x86_64.tar.gz > rootfs-x86_64.tar.gz.sha256
+            sha256sum sysroot-x86_64.tar.gz > sysroot-x86_64.tar.gz.sha256
+            ls -la
+          )
 
       - name: Publish x86-latest
         shell: bash
