@@ -31,8 +31,31 @@ mkdir -p "$OUT/assets" "$STAGE/arm64" "$STAGE/x86_64"
 # "cd: build/payload-rootfs: No such file or directory" is exactly the indirect
 # symptom that shows up when this check is silent.
 need() { [[ -e "$1" ]] || { echo "missing prerequisite: $1" >&2; echo "  produced by: $2" >&2; exit 1; }; }
-need build/rootfs/rootfs-arm64.tar "scripts/build-rootfs-image.sh"
-need build/rootfs/rootfs-x86_64.tar "scripts/build-rootfs.sh"
+# 拆分后两棵树来自 base-latest（顶层带目录名的 tar.gz），fetch-base.sh 解包即目录；
+# 本地全量自建时 build-rootfs*.sh 也落同名目录。不再消费旧的扁平 .tar。
+# Both trees come from base-latest as directory-named tarballs; fetch-base.sh
+# unpacks them into directories. The old flat .tar form is gone.
+# 两棵树的两种合法形态：base-latest 拉下来是目录（顶层带目录名的 tar.gz）；
+# 本地全量自建（build-rootfs*.sh）落的是扁平 .tar——首次使用时解包成目录。
+# Trees come in two legal forms: a directory (unpacked from base-latest's
+# directory-named tarball) or a flat .tar from a local full build (unpacked
+# once on first use).
+tree_src() { # $1 = arm64|x86_64 -> echoes the tree directory
+  local n="$1"
+  if [[ -d "build/rootfs/rootfs-$n" ]]; then
+    echo "build/rootfs/rootfs-$n"
+  elif [[ -f "build/rootfs/rootfs-$n.tar" ]]; then
+    mkdir -p "build/rootfs/rootfs-$n"
+    tar -C "build/rootfs/rootfs-$n" -xf "build/rootfs/rootfs-$n.tar"
+    echo "build/rootfs/rootfs-$n"
+  else
+    echo "missing prerequisite: build/rootfs/rootfs-$n{,.tar}" >&2
+    echo "  produced by: base.yml (base-latest) / scripts/build-rootfs-image.sh (arm64) or scripts/build-rootfs.sh (x86_64)" >&2
+    exit 1
+  fi
+}
+TREE_ARM64="$(tree_src arm64)"
+TREE_X86="$(tree_src x86_64)"
 need "build/glibc/install$FXD_LDSO" "scripts/build-glibc.sh"
 need "build/fex/install$FXD_ROOT/usr/bin/FEX" "scripts/build-fex.sh"
 
@@ -43,7 +66,7 @@ need "build/fex/install$FXD_ROOT/usr/bin/FEX" "scripts/build-fex.sh"
 
 # ---- arm64 rootfs ------------------------------------------------------------------
 A="$STAGE/arm64"
-tar -C "$A" -xf build/rootfs/rootfs-arm64.tar
+cp -a "$TREE_ARM64/." "$A/"
 # Patched glibc runtime (same ABI as Debian's libc6, see scripts/build-glibc.sh).
 G="build/glibc/install$FXD_LIBDIR"
 for f in "$G"/*.so* ; do
@@ -142,7 +165,7 @@ clang --target=aarch64-linux-gnu --sysroot=build/rootfs/sysroot-arm64 -fuse-ld=l
 
 # ---- x86_64 guest rootfs --------------------------------------------------------
 X="$STAGE/x86_64"
-tar -C "$X" -xf build/rootfs/rootfs-x86_64.tar
+cp -a "$TREE_X86/." "$X/"
 # Absolute symlinks would escape the RootFS on the phone (NOTES.md N-018).
 python3 scripts/lib/relativize-symlinks.py "$X"
 mkdir -p "$X/opt/fexdroid-tests"
