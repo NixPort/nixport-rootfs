@@ -211,8 +211,13 @@ find build/fex/install -name '*-host.so' -o -name '*-guest.so' | sort
 # NEWER than the runtime tree's libc6 (old symbols on newer glibc are legal; the
 # reverse means missing symbols at runtime). libc6 comes from sysroot-arm64's dpkg
 # status (FEX is linked against it).
-LIBC6_FEX="$(grep -m1 '^libc6 ' build/rootfs/sysroot-arm64/var/lib/dpkg/status | awk '{print $2}')"
-[[ -n "$LIBC6_FEX" ]] || { echo "libc6 not found in sysroot-arm64 dpkg status" >&2; exit 1; }
+# sysroot 不带 dpkg 数据库（只拷 /usr 子集），改从 libc.so.6 的 glibc 版本横幅
+# 取版本——这就是 FEX 实际链接的事实，比 dpkg status 更不会漂移。
+# The sysroot carries no dpkg database (only a /usr subset) — read the glibc
+# version banner from the actual libc.so.6 FEX links against.
+LIBC6_FEX="$(strings "$(find "$SYSROOT" -name libc.so.6 -print -quit)" 2>/dev/null \
+  | sed -nE 's/.*Debian GLIBC ([^)]+).*/\1/p' | head -1)" || LIBC6_FEX=""
+[[ -n "$LIBC6_FEX" ]] || { echo "CONTRACT FAIL: cannot read glibc version banner from $SYSROOT's libc.so.6" >&2; exit 1; }
 python3 - "$PWD/build/fex" "$FXD_PACKAGE" "$FXD_ROOT" "$FXD_LDSO" "$LIBC6_FEX" "${FEX_TAG}" "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
 import json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
