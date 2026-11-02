@@ -82,11 +82,19 @@ jobs:
         run: |
           scripts/build-rootfs-image.sh 2>&1 | tail -40
 
-      - name: sysroot-arm64 + x86_64 guest tree
+      - name: sysroot-arm64 (x86_64 side fetched from x86-latest)
+        # 范围修订（x86 拆分）：x86_64 客机树 + sysroot-x86_64 是存量稳定输入，
+        # 由独立流水线 x86.yml 构建并发布 x86-latest，主管线只构建 arm64 侧。
         shell: bash
         run: |
-          SYSROOT_ONLY=1 scripts/build-rootfs.sh 2>&1 | tail -40
-          scripts/build-x86-sysroot.sh 2>&1 | tail -20
+          SYSROOT_ONLY=1 SKIP_X86=1 scripts/build-rootfs.sh 2>&1 | tail -20
+
+      - name: Fetch x86_64 assets (x86-latest release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/fetch-x86-assets.sh 2>&1 | tail -20
 
       # ---- 组件编译（全量；失败即红） ------------------------------------------
       - name: glibc (patched)

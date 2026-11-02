@@ -22,6 +22,11 @@ IMAGE="debian:trixie-slim"
 # sysroot-arm64 + the x86_64 guest tree — in the supply pipeline the runtime tree
 # comes from build-rootfs-image.sh (locked uris + base digest).
 SYSROOT_ONLY="${SYSROOT_ONLY:-0}"
+# SKIP_X86=1：x86_64 客机树由独立流水线（x86.yml）构建并发布 x86-latest，
+# 主管线从该 release 拉取成品，本地不再重复构建。
+# SKIP_X86=1: the x86_64 guest tree belongs to the x86.yml workflow (published to
+# x86-latest); the main pipeline fetches it from that release instead.
+SKIP_X86="${SKIP_X86:-0}"
 mkdir -p "$OUT"
 # 前置自检：包清单必须非空（空清单会静默产出空树）。
 # Preflight: the package list must exist and be non-empty (an empty list would
@@ -131,6 +136,7 @@ fi # SKIP_ARM
 # (amd64 + i386) tree is built separately by scripts/build-rootfs-x86-multilib.sh.
 X86_PKGS=(libc6 libstdc++6 coreutils libx11-6 libxcb1 libvulkan1 vulkan-tools  # vulkan-tools: vkcube for phase 3
           libpulse0 pulseaudio-utils)                                          # phase 4: x86 audio clients
+if [[ "$SKIP_X86" != 1 ]]; then
 echo ">> x86_64 guest rootfs"
 build_tree rootfs-x86_64-raw linux/amd64 "${X86_PKGS[@]}"
 rm -rf "$OUT/stage" && mkdir -p "$OUT/stage"
@@ -145,6 +151,7 @@ echo ">> packing x86_64 guest tree"
 tar -C "$OUT/stage" --numeric-owner --owner=0 --group=0 -cf "$OUT/rootfs-x86_64.tar" .
 rm -rf "$OUT/stage" "$OUT/rootfs-x86_64-raw.tar"
 echo "   x86_64 guest tree: $(du -h "$OUT/rootfs-x86_64.tar" | cut -f1)"
+fi # SKIP_X86
 
 if [[ "$SYSROOT_ONLY" != 1 && "${SKIP_ARM:-0}" != 1 ]]; then
   du -sh "$OUT/rootfs-arm64.tar"
@@ -152,7 +159,9 @@ fi
 if [[ "${SKIP_ARM:-0}" != 1 ]]; then
   du -sh "$OUT/sysroot-arm64"
 fi
-du -sh "$OUT/rootfs-x86_64.tar"
+if [[ "$SKIP_X86" != 1 ]]; then
+  du -sh "$OUT/rootfs-x86_64.tar"
+fi
 if [[ "$SYSROOT_ONLY" != 1 && "${SKIP_ARM:-0}" != 1 ]]; then
   echo "glibc: $(grep '^libc6 ' "$OUT/rootfs-arm64.packages.txt")"
 fi
