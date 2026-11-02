@@ -67,12 +67,13 @@ jobs:
           for f in /usr/lib/llvm-22/bin/*; do sudo ln -sf "$f" /usr/local/bin/$(basename "$f"); done
           clang --version | head -1
 
-      - name: sysroot-arm64 (fex cross-build input)
-        # 拆分后本流水线自建前置：SYSROOT_ONLY=1 SKIP_X86=1 只产 sysroot-arm64
-        # （FEX 交叉编译 + host thunks 的头文件来源；skip Runtime 树与 x86 侧）。
+      - name: Fetch sysroot-arm64 (base-latest)
+        # 原料从 base.yml 拉取（与主管线同源 → libc6 契约校验恒过，无漂移）。
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          SYSROOT_ONLY=1 SKIP_X86=1 scripts/build-rootfs.sh 2>&1 | tail -20
+          scripts/fetch-base.sh sysroot-arm64.tar.gz 2>&1 | tail -10
 
       - name: Build fex + thunks
         shell: bash

@@ -1,0 +1,139 @@
+# 原料层流水线（范围修订：依赖图提升）。
+#
+# 构建**所有下游流水线的公共祖先**——它们唯一的变化来源是包清单/基底镜像/Debian
+# archive，与 app 无关，所以独立成层、按需重建、长期复用：
+#   锁定 Runtime 树（arm64 Debian，uris 锁定 + 基底 digest）
+#   sysroot-arm64 / sysroot-x86_64（交叉编译视图）
+#   x86_64 客机树（存量稳定）
+# 发布两个滚动 release：
+#   base-latest   原料资产（fex.yml 与 supply.yml 从这里拉取）
+#   rootfs-latest 设备直装包（zst + uris/base/packages 锁定清单，手机/topup）
+# 包数下限断言在本层拦截（uris 空装 bug 的最早拦截点）。
+# 原先的 x86.yml 已并入本流水线（其产物就是原料）。
+name: base assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Debian release the trees are built from'
+        required: true
+        default: 'trixie'
+        type: choice
+        options: [trixie, sid]
+      snapshot:
+        description: 'Pin the Debian archive (YYYYMMDDTHHMMSSZ); empty = live archive'
+        required: false
+        default: ''
+  push:
+    branches: ['main']
+    paths:
+      - 'scripts/build-rootfs.sh'
+      - 'scripts/build-rootfs-image.sh'
+      - 'scripts/build-x86-sysroot.sh'
+      - 'scripts/lib/rootfs-packages.txt'
+      - 'scripts/lib/rootfs-trim.sh'
+      - 'scripts/ensure-binfmt.sh'
+      - '.github/workflows/base.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: base-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  base:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SUITE: ${{ github.event.inputs.suite || 'trixie' }}
+      SNAPSHOT: ${{ github.event.inputs.snapshot }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+
+      # arm64 树经 qemu；x86_64 侧原生。
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd pigz >/dev/null
+
+      - name: Runtime tree (locked image)
+        shell: bash
+        run: |
+          scripts/build-rootfs-image.sh 2>&1 | tail -30
+
+      - name: sysroot-arm64 + x86_64 guest tree + sysroot-x86_64
+        shell: bash
+        run: |
+          SYSROOT_ONLY=1 scripts/build-rootfs.sh 2>&1 | tail -20
+          scripts/build-x86-sysroot.sh 2>&1 | tail -10
+
+      - name: Pack base assets
+        # 包数下限断言：uris 空装 bug（树只剩基底 78 包）的最早拦截点——在原料层
+        # 就拦住，不让坏树流向任何下游。
+        shell: bash
+        run: |
+          mkdir -p build/release
+          NP="$(grep -c '^Package:' build/rootfs/rootfs-arm64.packages.txt)"
+          [[ "$NP" -ge 250 ]] || { echo "BASE FAIL: runtime tree has only $NP packages (manifest install broke?)" >&2; exit 1; }
+          ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - rootfs-arm64.tar | pigz -9 ) \
+            > build/release/rootfs-arm64.tar.gz
+          ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - sysroot-arm64 | pigz -9 ) \
+            > build/release/sysroot-arm64.tar.gz
+          ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - sysroot-x86_64 | pigz -9 ) \
+            > build/release/sysroot-x86_64.tar.gz
+          ( cd build/rootfs && tar --sort=name --owner=0 --group=0 -cf - rootfs-x86_64.tar | pigz -9 ) \
+            > build/release/rootfs-x86_64.tar.gz
+          for f in rootfs-arm64.tar.gz sysroot-arm64.tar.gz sysroot-x86_64.tar.gz rootfs-x86_64.tar.gz; do
+            ( cd build/release && sha256sum "$f" > "$f.sha256" )
+          done
+          echo "runtime tree packages: $NP"
+          ls -la build/release
+
+      - name: Publish base-latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view base-latest >/dev/null 2>&1 || \
+            gh release create base-latest --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nixport base assets (trees + sysroots)" \
+              --notes "Raw materials consumed by fex.yml / supply.yml / Port developers (sysroot-arm64). Contract: rootfs-arm64.packages.txt (libc6 version is the ABI baseline)."
+          gh release upload base-latest --clobber \
+            build/release/rootfs-arm64.tar.gz \
+            build/release/sysroot-arm64.tar.gz \
+            build/release/sysroot-x86_64.tar.gz \
+            build/release/rootfs-x86_64.tar.gz \
+            build/release/rootfs-arm64.packages.txt \
+            build/release/*.sha256
+          gh release edit base-latest --title "Nixport base assets ($SUITE) ${GITHUB_SHA:0:7}"
+
+      # 设备直装渠道（同一次构建的锁定树，zst 高压缩）。
+      - name: Publish rootfs-latest (device-direct)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/release-rootfs
+          zstd -q -19 -T0 -f build/rootfs/rootfs-arm64.tar -o build/release-rootfs/rootfs-arm64.tar.zst
+          for f in rootfs-arm64.uris.txt rootfs-arm64.base.txt rootfs-arm64.packages.txt; do
+            cp "build/rootfs/$f" build/release-rootfs/
+          done
+          ( cd build/release-rootfs && sha256sum rootfs-arm64.tar.zst > rootfs-arm64.tar.zst.sha256 )
+          gh release view rootfs-latest >/dev/null 2>&1 || \
+            gh release create rootfs-latest --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Nixport runtime rootfs (device-direct)" \
+              --notes "Locked runtime tree (.tar.zst) + lock lists (uris/base/packages, consumed by nxp-rootfs-topup.sh)."
+          gh release upload rootfs-latest --clobber build/release-rootfs/*
+          gh release edit rootfs-latest --title "Nixport device rootfs ($SUITE) ${GITHUB_SHA:0:7}"
