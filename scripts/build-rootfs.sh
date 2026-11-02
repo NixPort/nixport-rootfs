@@ -22,10 +22,10 @@ IMAGE="debian:trixie-slim"
 # sysroot-arm64 + the x86_64 guest tree — in the supply pipeline the runtime tree
 # comes from build-rootfs-image.sh (locked uris + base digest).
 SYSROOT_ONLY="${SYSROOT_ONLY:-0}"
-# SKIP_X86=1：x86_64 客机树由独立流水线（x86.yml）构建并发布 x86-latest，
-# 主管线从该 release 拉取成品，本地不再重复构建。
-# SKIP_X86=1: the x86_64 guest tree belongs to the x86.yml workflow (published to
-# x86-latest); the main pipeline fetches it from that release instead.
+# SKIP_X86=1：跳过 x86_64 客机树（历史旋钮）。x86.yml 并入 base.yml 后，CI 的
+# sysroot-only 档仍会构建客机树并随 base-latest 发布，主管线从那里拉取。
+# SKIP_X86=1: skip the x86_64 guest tree (legacy knob). Since x86.yml merged into
+# base.yml, the CI sysroot-only run builds and publishes it with base-latest.
 SKIP_X86="${SKIP_X86:-0}"
 mkdir -p "$OUT"
 # 前置自检：包清单必须非空（空清单会静默产出空树）。
